@@ -1,0 +1,37 @@
+# Second example — demonstrates multi-file discovery and an optional parameter
+# with a default. Tailored to the fraud-detection graph
+# (:Customer)-[:HAS_ACCOUNT]->(:Account)-[:PERFORMS]->(:Transaction)-[:BENEFITS_TO]->(:HighRiskJurisdiction).
+# Registered as tool:  usecase_detect_synthetic_identity
+name: detect_synthetic_identity
+description: >
+  Identifies potential synthetic identities by finding clusters of
+  identities sharing PII elements without legitimate relationship explanation.
+parameters:
+  - name: customer_id
+    type: string
+    description: Specific customer ID to investigate (omit for discovery mode)
+    required: false
+  - name: min_shared_attributes
+    type: integer
+    default: 2
+    description: Minimum number of shared attributes to flag as suspicious
+    required: false
+  - name: limit
+    type: integer
+    default: 20
+    description: Maximum number of results to return
+    required: false
+cypher: |
+  // Customers sharing email
+  MATCH path=(c1:Customer)-[:HAS_EMAIL]->(:Email)<-[:HAS_EMAIL]-(c2:Customer)
+  RETURN path
+
+  // Multiple shared characteristics
+  MATCH path=(c1:Customer)-[:HAS_EMAIL|HAS_PHONE|HAS_PASSPORT]->(info)<-[:HAS_EMAIL|HAS_PHONE|HAS_PASSPORT]-(c2:Customer)
+  RETURN path
+
+  // Create monopartite relationships for GDS
+  MATCH (c1:Customer)-[:HAS_EMAIL|HAS_PHONE|HAS_PASSPORT]->(info)<-[:HAS_EMAIL|HAS_PHONE|HAS_PASSPORT]-(c2:Customer)
+  WHERE ID(c1) > ID(c2)
+  CREATE (c1)-[:LINKED]->(c2)
+read_only: true

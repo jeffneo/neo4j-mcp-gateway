@@ -1,0 +1,12 @@
+{
+  // VS Code MCP config. With this file in the workspace, VS Code (Copilot Chat /
+  // MCP-enabled clients) will launch the gateway over stdio. Credentials are read
+  // from the project's .env file (see .env.example).
+  "servers": {
+    "neo4j-gateway": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--directory", "${workspaceFolder}", "neo4j-mcp-gateway"]
+    }
+  }
+}

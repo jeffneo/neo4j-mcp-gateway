@@ -1,0 +1,29 @@
+# Second example — demonstrates multi-file discovery and an optional parameter
+# with a default. Tailored to the fraud-detection graph
+# (:Customer)-[:HAS_ACCOUNT]->(:Account)-[:PERFORMS]->(:Transaction)-[:BENEFITS_TO]->(:HighRiskJurisdiction).
+# Registered as tool:  usecase_high_risk_transactions
+name: high_risk_transactions
+description: >
+  List a customer's outgoing transactions that benefit an account in a high-risk
+  jurisdiction, optionally filtered to a minimum amount. Useful for AML triage.
+parameters:
+  - name: customer_id
+    type: string
+    description: The Customer.customerId to investigate
+    required: true
+  - name: min_amount
+    type: number
+    description: Only return transactions at or above this amount
+    required: false
+    default: 0
+cypher: |
+  MATCH (c:Customer {customerId: $customer_id})-[:HAS_ACCOUNT]->(:Account)
+        -[:PERFORMS]->(t:Transaction)-[:BENEFITS_TO]->(hr:HighRiskJurisdiction)
+  WHERE t.amount >= $min_amount
+  RETURN t.transactionId AS transactionId,
+         t.amount        AS amount,
+         t.currency      AS currency,
+         t.date          AS date,
+         hr.accountNumber AS beneficiaryAccount
+  ORDER BY t.amount DESC
+read_only: true
