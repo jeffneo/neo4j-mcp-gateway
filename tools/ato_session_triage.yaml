@@ -1,0 +1,51 @@
+# Ranks login sessions by account-takeover risk using observable graph signals
+# only (never reads the isFraud/caseType ground-truth fields). Mirrors the
+# scoring query in data/README.md.
+# Registered as tool:  usecase_ato_session_triage
+name: ato_session_triage
+description: >
+  Triage login sessions for account-takeover risk. Scores each session on
+  new/untrusted device, high-risk or VPN/Tor IP, failed-login bursts, MFA
+  bypass, password reset, contact-detail changes, and rapid transfers to a
+  high-risk payee. Returns the highest-risk sessions first with the signal
+  breakdown. Read-only; safe to run anytime.
+parameters:
+  - name: min_risk
+    type: integer
+    description: Only return sessions whose computed risk score is at least this value.
+    required: false
+    default: 0
+  - name: limit
+    type: integer
+    description: Maximum number of sessions to return.
+    required: false
+    default: 25
+cypher: |
+  MATCH (c:Customer)-[:HAS_SESSION]->(s:Session)
+  OPTIONAL MATCH (s)-[:SESSION_USES_DEVICE]->(d:Device)-[u:USED_BY]->(c)
+  OPTIONAL MATCH (s)-[:USES_IP]->(ip:IP)
+  WITH c, s,
+       coalesce(u.isTrusted, false) AS deviceTrusted,
+       coalesce(ip.riskScore, 0)    AS ipRisk,
+       COUNT { MATCH (s)-[:HAS_AUTHENTICATION]->(a) WHERE a.status = 'failed' }      AS failedLogins,
+       COUNT { MATCH (s)-[:HAS_AUTHENTICATION]->(a) WHERE a.mfaResult = 'bypassed' } AS mfaBypass,
+       COUNT { MATCH (s)-[:HAS_CHANGE_CREDENTIAL]->(x) }                             AS pwReset,
+       COUNT { MATCH (s)-[:HAS_CHANGE_EMAIL|HAS_CHANGE_PHONE|HAS_CHANGE_ADDRESS]->(x) } AS contactChanges,
+       COUNT { MATCH (s)-[:HAS_ADD_EXTERNAL_ACCOUNT]->()-[:ADD_ACCOUNT]->(:HighRiskJurisdiction) } AS newHighRiskPayee
+  WITH c, s, deviceTrusted, ipRisk, failedLogins, mfaBypass, pwReset, contactChanges, newHighRiskPayee,
+       ( (CASE WHEN NOT deviceTrusted THEN 2 ELSE 0 END)
+       + (CASE WHEN ipRisk >= 80       THEN 2 ELSE 0 END)
+       + (CASE WHEN failedLogins >= 2  THEN 1 ELSE 0 END)
+       + mfaBypass + pwReset
+       + (CASE WHEN contactChanges > 0 THEN 1 ELSE 0 END)
+       + 2 * newHighRiskPayee ) AS riskScore
+  WHERE riskScore >= $min_risk
+  RETURN c.customerId AS customer,
+         s.sessionId  AS session,
+         s.createdAt  AS at,
+         riskScore,
+         (NOT deviceTrusted) AS newDevice,
+         ipRisk, failedLogins, mfaBypass, pwReset, contactChanges, newHighRiskPayee
+  ORDER BY riskScore DESC, at DESC
+  LIMIT $limit
+read_only: true

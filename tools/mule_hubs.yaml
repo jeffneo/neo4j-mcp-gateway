@@ -1,0 +1,29 @@
+# Finds high-risk beneficiary accounts that receive funds from MULTIPLE customers
+# — the money-mule "hub" pattern that ties separate takeovers into one ring.
+# Registered as tool:  usecase_mule_hubs
+name: mule_hubs
+description: >
+  Detect money-mule hubs: single high-risk-jurisdiction beneficiary accounts
+  that receive transfers from two or more distinct customers. Returns each hub
+  with its victim list, transfer count, and total amount drained. Read-only.
+parameters:
+  - name: min_victims
+    type: integer
+    description: Minimum number of distinct paying customers for a beneficiary to count as a hub.
+    required: false
+    default: 2
+cypher: |
+  MATCH (benef:HighRiskJurisdiction)<-[:BENEFITS_TO]-(t:Transaction)
+        <-[:PERFORMS]-(:Account)<-[:HAS_ACCOUNT]-(c:Customer)
+  WITH benef,
+       collect(DISTINCT c.customerId) AS victims,
+       count(t)      AS transfers,
+       sum(t.amount) AS totalOut
+  WHERE size(victims) >= $min_victims
+  RETURN benef.accountNumber AS muleAccount,
+         size(victims)       AS victimCount,
+         victims,
+         transfers,
+         totalOut
+  ORDER BY totalOut DESC
+read_only: true
