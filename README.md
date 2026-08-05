@@ -97,7 +97,7 @@ npx @modelcontextprotocol/inspector --cli uv run neo4j-mcp-gateway \
 
 # Call a YAML use-case tool
 npx @modelcontextprotocol/inspector --cli uv run neo4j-mcp-gateway \
-  --method tools/call --tool-name usecase_search_movies_by_actor --tool-arg actor="Keanu Reeves"
+  --method tools/call --tool-name usecase_ato_session_triage --tool-arg min_risk=5
 ```
 
 Or launch the Inspector UI (drop `--cli`) and browse/click the tools.
@@ -285,12 +285,14 @@ neo4j-mcp-gateway/
     proxy.py        # spawn & re-expose the official neo4j/mcp downstream
     yaml_tools.py   # YAML discovery, validation, MCP registration, Cypher execution
     config.py       # env-based config (.env)
-  tools/
-    example_movies.yaml         # canonical documented example
-    high_risk_transactions.yaml # fraud-graph example (optional param)
-    ato_session_triage.yaml     # ATO: risk-score every login session
-    new_device_logins.yaml      # ATO: logins from untrusted devices
-    mule_hubs.yaml              # ATO: shared high-risk beneficiaries (rings)
+  tools/                        # ATO use-case tools (one YAML each)
+    ato_session_triage.yaml     # risk-score every login session
+    ato_lifecycle.yaml          # full access -> change -> payee -> transfer chain
+    event_velocity.yaml         # automated-attack event velocity
+    new_device_logins.yaml      # logins from untrusted devices
+    shared_device_accounts.yaml # one device across many customers (ring)
+    mule_hubs.yaml              # shared high-risk beneficiaries (ring)
+    contact_change_history.yaml # forensic old-vs-new contact changes
   data/
     ato_demo.cypher             # account-takeover demo dataset generator
     README.md                   # load steps + detection queries

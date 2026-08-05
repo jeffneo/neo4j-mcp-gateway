@@ -37,21 +37,26 @@ to point out**.
 → `usecase_new_device_logins`.  🎤 New/untrusted devices, VPN/Tor exits in a high-risk country, first-seen = the moment of attack.
 
 **4. Drill into the worst one**
-> "Take the top session. Walk me through exactly what the attacker did after logging in — step by step, in order."
+> "Take those risky sessions. Show me the complete takeover lifecycle — from login through to the money leaving — and tell me how fast it happened."
 
-→ `read-cypher` (the model writes a `NEXT`-chain traversal).  🎤 The lock-out chain: MFA bypass → password reset → swap phone/email/address → add payee → wire £15k, all in ~2 minutes.
+→ `usecase_ato_lifecycle` (+ often `usecase_event_velocity`).  🎤 The lock-out chain: MFA bypass → password reset → swap phone/email/address → add payee → wire £15k, all in ~2 minutes — and the velocity says *automated*.
 
-**5. Is it a ring?**
+**5. What exactly did they change? (forensics)**
+> "For the worst victim, what contact details were changed, and what were the old and new values?"
+
+→ `usecase_contact_change_history`.  🎤 Phone → a Nigerian number, email → a disposable domain, address → Lagos. This is the trail you use to *restore* the customer.
+
+**6. Is it a ring?**
 > "Are any of these connected — same device, or money going to the same account? Could this be one operation rather than separate incidents?"
 
-→ `usecase_mule_hubs` (and often a `read-cypher` for the shared device).  🎤 Two victims → one mule account, reached from one attacker device. The graph turns three alerts into one ring.
+→ `usecase_mule_hubs` + `usecase_shared_device_accounts`.  🎤 Two victims → one mule account, reached from one shared attacker device. The graph turns three alerts into one ring.
 
-**6. Precision check (the one you *don't* freeze)**
+**7. Precision check (the one you *don't* freeze)**
 > "Was there a login that looks suspicious on the surface — like from a new country — that's actually a legitimate customer? I don't want to lock someone out."
 
 → `read-cypher` / reasoning.  🎤 The New York login: own trusted device, MFA passed, nothing changed, normal payee. Context clears it.
 
-**7. Brief it**
+**8. Brief it**
 > "Summarise this as a short fraud-ops briefing: what happened, which customers and accounts, how much moved, and what I should do next."
 
 → synthesis (no tool).  🎤 The analyst's deliverable, straight from the graph.
@@ -70,8 +75,9 @@ A single kickoff prompt that lets the model plan and chain the tools itself:
 > recommended actions. Do **not** rely on any field that simply labels something
 > as fraud — reason from the behaviour in the graph. Read-only, please."
 
-🎤 Let it run and narrate its own tool calls — triage, then new-device, then the
-mule hub, then a summary. This is the moment the room understands "MCP + graph."
+🎤 Let it run and narrate its own tool calls — triage → new-device → lifecycle →
+mule hub / shared device → summary. This is the moment the room understands
+"MCP + graph."
 
 ---
 
@@ -79,6 +85,10 @@ mule hub, then a summary. This is the moment the room understands "MCP + graph."
 
 - Triage: *"Score the recent logins for takeover risk."* / *"Which sessions should a fraud analyst look at first?"*
 - New device: *"Show me logins from devices we don't trust for that customer."*
+- Lifecycle: *"Find complete takeover chains that end in a transfer."* / *"Access-to-payout timelines?"*
+- Velocity: *"Which sessions fired too fast to be a human?"*
+- Change history: *"What phone/email/address changes happened, old vs new?"*
+- Shared device: *"Is one device being used across multiple customers?"*
 - Mule hub: *"Which accounts are receiving money from more than one victim?"* / *"Find the mule accounts."*
 
 ## Notes for the presenter

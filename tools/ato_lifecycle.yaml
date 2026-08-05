@@ -1,0 +1,44 @@
+# Detects the COMPLETE account-takeover kill chain in one session:
+# successful auth -> contact change(s) -> add external payee -> transfer out.
+# Adapted from the Neo4j retail-banking ATO use case (section 5.5).
+# Registered as tool:  usecase_ato_lifecycle
+name: ato_lifecycle
+description: >
+  Find complete account-takeover lifecycles: a successful login followed (via
+  the NEXT event chain) by contact-detail changes, an added external account,
+  and a fund transfer. Returns each victim with the access time, transfer time,
+  amount, destination account, whether the destination is high-risk, and how
+  many minutes elapsed from access to payout. Read-only.
+parameters:
+  - name: max_minutes
+    type: number
+    description: Only return chains where access-to-transfer took at most this many minutes.
+    required: false
+    default: 60
+  - name: limit
+    type: integer
+    description: Maximum number of lifecycles to return.
+    required: false
+    default: 25
+cypher: |
+  MATCH (c:Customer)-[:CONNECTS]->(auth:Authentication)
+  WHERE auth.status = 'success'
+  MATCH (auth)-[:NEXT*1..10]->(chg)
+  WHERE chg:ChangePhone OR chg:ChangeEmail OR chg:ChangeAddress
+  MATCH (chg)-[:NEXT*1..5]->(add:AddExternalAccount)
+  MATCH (add)-[:NEXT*1..3]->(tr:Transfer)-[:HAS_TRANSACTION]->(t:Transaction)
+  MATCH (t)-[:BENEFITS_TO]->(dest:Account)
+  WITH DISTINCT c, auth, tr, t, dest,
+       duration.inSeconds(auth.createdAt, tr.createdAt).seconds / 60.0 AS minutesToTransfer
+  WHERE minutesToTransfer <= $max_minutes
+  RETURN c.customerId          AS victim,
+         auth.createdAt        AS accessTime,
+         tr.createdAt          AS transferTime,
+         round(minutesToTransfer, 2) AS minutesToTransfer,
+         t.amount              AS amount,
+         t.currency            AS currency,
+         dest.accountNumber    AS destinationAccount,
+         ('HighRiskJurisdiction' IN labels(dest)) AS destinationHighRisk
+  ORDER BY amount DESC
+  LIMIT $limit
+read_only: true

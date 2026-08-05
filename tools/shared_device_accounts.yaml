@@ -1,0 +1,37 @@
+# Finds a single device used to access MULTIPLE customers' accounts — the classic
+# credential-stuffing / shared-attacker-device signal that links a fraud ring.
+# Adapted from the Neo4j retail-banking ATO use case (section 5.1).
+# Registered as tool:  usecase_shared_device_accounts
+name: shared_device_accounts
+description: >
+  Detect devices used to access more than one customer's accounts — a common
+  credential-stuffing and account-takeover-ring indicator. Returns each shared
+  device with its type/user-agent, whether it is an emulator, the customers it
+  touched, and the accounts reachable through it. Read-only.
+parameters:
+  - name: min_customers
+    type: integer
+    description: Minimum number of distinct customers a device must be linked to.
+    required: false
+    default: 2
+  - name: limit
+    type: integer
+    description: Maximum number of devices to return.
+    required: false
+    default: 25
+cypher: |
+  MATCH (d:Device)-[:USED_BY]->(c:Customer)
+  WITH d, count(DISTINCT c) AS customerCount, collect(DISTINCT c.customerId) AS customers
+  WHERE customerCount >= $min_customers
+  OPTIONAL MATCH (d)-[:USED_BY]->(:Customer)-[:HAS_ACCOUNT]->(a:Account)
+  WITH d, customerCount, customers, collect(DISTINCT a.accountNumber) AS accounts
+  RETURN d.deviceId    AS device,
+         d.deviceType  AS deviceType,
+         d.userAgent   AS userAgent,
+         d.isEmulator  AS emulator,
+         customerCount AS customerCount,
+         customers     AS customers,
+         accounts      AS accounts
+  ORDER BY customerCount DESC
+  LIMIT $limit
+read_only: true

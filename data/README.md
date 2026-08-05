@@ -114,20 +114,23 @@ Expected baseline: 6 customers, 16 sessions (12 normal + 3 ATO + 1 travel).
 > **Point:** emulator device, `isVpn`/`isTor` true, `deviceFirstSeen` = the
 > moment of attack. In a graph, "new device" is one hop, not a batch job.
 
-### Act 3 — The kill chain inside one session (the money shot)
-> **Say:** "Follow what the attacker did after logging in — one `NEXT` chain:
-> bypass MFA, reset the password, swap the victim's phone/email/address so they
-> can't get back in, add a brand-new payee, and wire £15k out. All in ~2 minutes."
+### Act 3 — The kill chain (the money shot)
+> **Say:** "Follow what happened after login — one `NEXT` chain: bypass MFA,
+> reset the password, swap the victim's phone/email/address so they can't get
+> back in, add a brand-new payee, wire the money out. The graph gives us the
+> whole lifecycle with the amount and how fast it happened."
 
-- **Prompt:** *"Show the sequence of events in session SESS-A-1004."*
-- **Tool:** `read-cypher` with:
+- **Prompt:** *"Show me the complete account-takeover lifecycles — access through to the transfer."*
+- **Tool:** `usecase_ato_lifecycle` → 3 victims, £15k/£9.5k/£8.2k, **2–2.5 min** access-to-payout, high-risk destination flagged.
+- **Prompt:** *"Which of these look automated rather than human?"*
+- **Tool:** `usecase_event_velocity` → same sessions at **2–3.5 events/min**.
 
-```cypher
-MATCH (:Session {sessionId:'SESS-A-1004'})-[:HAS_AUTHENTICATION]->(ok:Authentication {status:'success'})
-MATCH path = (ok)-[:NEXT*]->(:Transfer)
-RETURN [n IN nodes(path) | labels(n)[0]] AS killChain;
-// -> [Authentication, ChangeCredential, ChangePhone, ChangeEmail, ChangeAddress, AddExternalAccount, Transfer]
-```
+> **Then the forensic beat — "what exactly did they change?"**
+- **Prompt:** *"Show the contact-detail changes for customer CUST-1004, old vs new."*
+- **Tool:** `usecase_contact_change_history` (`customer_id: CUST-1004`)
+  → phone `+44…→+234…`, email → disposable domain, address London → Lagos.
+
+🎤 That old-vs-new trail is what you hand the investigator to *restore* the victim.
 
 ### Act 4 — Connect the dots: it's a ring, not an incident
 > **Say:** "Two *different* victims, two different sessions — but the money lands
@@ -135,15 +138,9 @@ RETURN [n IN nodes(path) | labels(n)[0]] AS killChain;
 > turning three isolated alerts into one ring."
 
 - **Prompt:** *"Find money-mule hubs."*
-- **Tool:** `usecase_mule_hubs` (`min_victims: 2`) → `ACC-MULE-1`, 2 victims, £17,700
-- **Prompt:** *"Which untrusted devices are shared across customers?"*
-- **Tool:** `read-cypher`:
-
-```cypher
-MATCH (d:Device)-[u:USED_BY]->(c:Customer)
-WHERE u.isTrusted = false
-RETURN d.deviceId AS device, d.isEmulator AS emulator, collect(c.customerId) AS victims;
-```
+- **Tool:** `usecase_mule_hubs` (`min_victims: 2`) → `ACC-MULE-1`, 2 victims, £17,700.
+- **Prompt:** *"Is one device being used across multiple customers?"*
+- **Tool:** `usecase_shared_device_accounts` → `DEV-ATT-RING` links CUST-1005 & CUST-1006 and their accounts.
 
 ### Act 5 — Precision: the login we *didn't* flag
 > **Say:** "A rule that just fires on *login from a new country* would have paged

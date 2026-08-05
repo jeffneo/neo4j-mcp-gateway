@@ -1,0 +1,46 @@
+# Flags sessions whose event chain fires too fast to be human — the hallmark of
+# an automated (scripted) account takeover.
+# Adapted from the Neo4j retail-banking ATO use case (section 5.4).
+# Registered as tool:  usecase_event_velocity
+name: event_velocity
+description: >
+  Detect automated attacks by event velocity: sessions whose NEXT-linked event
+  chain (login -> changes -> add account -> transfer) contains many events in a
+  short window. Returns the chain's event count, elapsed minutes, and
+  events-per-minute (higher = more suspicious). Read-only.
+parameters:
+  - name: window_minutes
+    type: number
+    description: Only include chains that complete within this many minutes.
+    required: false
+    default: 30
+  - name: min_events
+    type: integer
+    description: Minimum number of events in the chain to be considered.
+    required: false
+    default: 3
+  - name: limit
+    type: integer
+    description: Maximum number of sessions to return.
+    required: false
+    default: 25
+cypher: |
+  // Chain head = a successful auth with no incoming NEXT; tail = event with no outgoing NEXT.
+  MATCH (c:Customer)-[:CONNECTS]->(firstEvent:Authentication)
+  WHERE NOT ( ()-[:NEXT]->(firstEvent) )
+  MATCH path = (firstEvent)-[:NEXT*]->(lastEvent)
+  WHERE NOT ( (lastEvent)-[:NEXT]->() )
+  WITH c, firstEvent, lastEvent,
+       length(path) + 1 AS eventCount,
+       duration.inSeconds(firstEvent.createdAt, lastEvent.createdAt).seconds AS durationSeconds
+  WHERE eventCount >= $min_events AND durationSeconds <= $window_minutes * 60
+  RETURN c.customerId       AS customer,
+         firstEvent.createdAt AS firstEventTime,
+         lastEvent.createdAt  AS lastEventTime,
+         eventCount           AS events,
+         round(durationSeconds / 60.0, 2) AS durationMinutes,
+         CASE WHEN durationSeconds = 0 THEN null
+              ELSE round(eventCount / (durationSeconds / 60.0), 2) END AS eventsPerMinute
+  ORDER BY eventsPerMinute DESC
+  LIMIT $limit
+read_only: true
