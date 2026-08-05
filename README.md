@@ -253,6 +253,27 @@ Prerequisites they need installed: **Python 3.11+**, **[uv](https://docs.astral.
 and (for the Inspector smoke test) **Node/npx**. No absolute paths to edit for the
 VS Code flow; only the Claude Desktop config needs their own two paths.
 
+## Demo data (account-takeover)
+
+`data/ato_demo.cypher` seeds a small, self-contained **ATO** dataset — realistic
+legitimate baseline, two fraud patterns (classic takeover + mule ring), and a
+false-positive traveler for precision discussion. Load it with:
+
+```bash
+cypher-shell -a "$NEO4J_URI" -u "$NEO4J_USERNAME" -p "$NEO4J_PASSWORD" -d "$NEO4J_DATABASE" -f data/ato_demo.cypher
+```
+
+It's idempotent and namespaced (`source:'ato-demo'`), so it won't disturb other
+data. See [`data/README.md`](data/README.md) for the roster, the ground-truth
+scoring fields, and copy-paste detection queries.
+
+**Running the lab:**
+- [`data/README.md`](data/README.md) — the **presenter runbook** (drives the
+  tools explicitly; good with the MCP Inspector).
+- [`data/demo_prompts.md`](data/demo_prompts.md) — **conversational prompts** to
+  paste into Claude Desktop so the model orchestrates the tools itself. This is
+  the intended payoff of the lab.
+
 ---
 
 ## Project layout
@@ -266,7 +287,13 @@ neo4j-mcp-gateway/
     config.py       # env-based config (.env)
   tools/
     example_movies.yaml         # canonical documented example
-    high_risk_transactions.yaml # 2nd example (optional param, fraud graph)
+    high_risk_transactions.yaml # fraud-graph example (optional param)
+    ato_session_triage.yaml     # ATO: risk-score every login session
+    new_device_logins.yaml      # ATO: logins from untrusted devices
+    mule_hubs.yaml              # ATO: shared high-risk beneficiaries (rings)
+  data/
+    ato_demo.cypher             # account-takeover demo dataset generator
+    README.md                   # load steps + detection queries
   .vscode/mcp.json
   .env.example
   pyproject.toml
