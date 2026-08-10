@@ -1,3 +1,9 @@
+# ##########################################################
+# EXERCISE — replace the cypher: block below with your query.
+# Reference answer: solutions/contact_change_history.yaml   (peek only if stuck!)
+# Test:  uv run python scripts/try_tool.py contact_change_history
+# ##########################################################
+
 # Forensic view of contact-detail changes (phone / email / address) with their
 # OLD vs NEW values — for investigating a takeover and restoring the victim.
 # Adapted from the Neo4j retail-banking ATO use case (section 5.6).
@@ -20,32 +26,11 @@ parameters:
     description: Maximum number of change rows to return.
     required: false
     default: 50
+# HINT:
+#   - For each (Customer)-[:HAS_SESSION]->(Session), OPTIONAL MATCH HAS_CHANGE_PHONE/EMAIL/ADDRESS.
+#   - Follow OLD_* / NEW_* to the value nodes. $customer_id = '' means 'all customers'.
+#   - Return one row per change: type, time, old, new (a list-comprehension + UNWIND works well).
 cypher: |
-  MATCH (c:Customer)-[:HAS_SESSION]->(s:Session)
-  WHERE $customer_id = '' OR c.customerId = $customer_id
-  OPTIONAL MATCH (s)-[:HAS_CHANGE_PHONE]->(pc:ChangePhone)
-  OPTIONAL MATCH (pc)-[:OLD_PHONE]->(op:Phone)
-  OPTIONAL MATCH (pc)-[:NEW_PHONE]->(np:Phone)
-  OPTIONAL MATCH (s)-[:HAS_CHANGE_EMAIL]->(ec:ChangeEmail)
-  OPTIONAL MATCH (ec)-[:OLD_EMAIL]->(oe:Email)
-  OPTIONAL MATCH (ec)-[:NEW_EMAIL]->(ne:Email)
-  OPTIONAL MATCH (s)-[:HAS_CHANGE_ADDRESS]->(ac:ChangeAddress)
-  OPTIONAL MATCH (ac)-[:OLD_ADDRESS]->(oa:Address)
-  OPTIONAL MATCH (ac)-[:NEW_ADDRESS]->(na:Address)
-  WITH c, s, [x IN [
-      CASE WHEN pc IS NOT NULL THEN {type:'phone',   at:pc.createdAt, old:op.number,  new:np.number}  END,
-      CASE WHEN ec IS NOT NULL THEN {type:'email',   at:ec.createdAt, old:oe.address, new:ne.address} END,
-      CASE WHEN ac IS NOT NULL THEN {type:'address', at:ac.createdAt,
-             old:(oa.addressLine1 + ', ' + oa.postTown), new:(na.addressLine1 + ', ' + na.postTown)} END
-    ] WHERE x IS NOT NULL] AS changes
-  WHERE size(changes) > 0
-  UNWIND changes AS change
-  RETURN c.customerId AS customer,
-         s.sessionId  AS session,
-         change.type  AS changeType,
-         change.at    AS changeTime,
-         change.old   AS oldValue,
-         change.new   AS newValue
-  ORDER BY changeTime DESC
-  LIMIT $limit
+  // TODO: implement contact_change_history. Parameters bind as $name. Keep it read-only.
+  RETURN 'TODO: implement contact_change_history' AS todo
 read_only: true

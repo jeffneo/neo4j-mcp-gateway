@@ -1,9 +1,3 @@
-# ##########################################################
-# EXERCISE — replace the cypher: block below with your query.
-# Reference answer: solutions/shared_device_accounts.yaml   (peek only if stuck!)
-# Test:  uv run python scripts/try_tool.py shared_device_accounts
-# ##########################################################
-
 # Finds a single device used to access MULTIPLE customers' accounts — the classic
 # credential-stuffing / shared-attacker-device signal that links a fraud ring.
 # Adapted from the Neo4j retail-banking ATO use case (section 5.1).
@@ -25,10 +19,19 @@ parameters:
     description: Maximum number of devices to return.
     required: false
     default: 25
-# HINT:
-#   - (d:Device)-[:USED_BY]->(c:Customer); keep devices with count(DISTINCT c) >= $min_customers.
-#   - collect(DISTINCT c.customerId) for the victim list; follow HAS_ACCOUNT for their accounts.
 cypher: |
-  // TODO: implement shared_device_accounts. Parameters bind as $name. Keep it read-only.
-  RETURN 'TODO: implement shared_device_accounts' AS todo
+  MATCH (d:Device)-[:USED_BY]->(c:Customer)
+  WITH d, count(DISTINCT c) AS customerCount, collect(DISTINCT c.customerId) AS customers
+  WHERE customerCount >= $min_customers
+  OPTIONAL MATCH (d)-[:USED_BY]->(:Customer)-[:HAS_ACCOUNT]->(a:Account)
+  WITH d, customerCount, customers, collect(DISTINCT a.accountNumber) AS accounts
+  RETURN d.deviceId    AS device,
+         d.deviceType  AS deviceType,
+         d.userAgent   AS userAgent,
+         d.isEmulator  AS emulator,
+         customerCount AS customerCount,
+         customers     AS customers,
+         accounts      AS accounts
+  ORDER BY customerCount DESC
+  LIMIT $limit
 read_only: true

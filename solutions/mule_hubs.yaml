@@ -1,9 +1,3 @@
-# ##########################################################
-# EXERCISE — replace the cypher: block below with your query.
-# Reference answer: solutions/mule_hubs.yaml   (peek only if stuck!)
-# Test:  uv run python scripts/try_tool.py mule_hubs
-# ##########################################################
-
 # Finds high-risk beneficiary accounts that receive funds from MULTIPLE customers
 # — the money-mule "hub" pattern that ties separate takeovers into one ring.
 # Registered as tool:  usecase_mule_hubs
@@ -18,10 +12,18 @@ parameters:
     description: Minimum number of distinct paying customers for a beneficiary to count as a hub.
     required: false
     default: 2
-# HINT:
-#   - (:HighRiskJurisdiction)<-[:BENEFITS_TO]-(t:Transaction)<-[:PERFORMS]-(:Account)<-[:HAS_ACCOUNT]-(c:Customer).
-#   - collect(DISTINCT c.customerId) AS victims; WHERE size(victims) >= $min_victims; sum(t.amount).
 cypher: |
-  // TODO: implement mule_hubs. Parameters bind as $name. Keep it read-only.
-  RETURN 'TODO: implement mule_hubs' AS todo
+  MATCH (benef:HighRiskJurisdiction)<-[:BENEFITS_TO]-(t:Transaction)
+        <-[:PERFORMS]-(:Account)<-[:HAS_ACCOUNT]-(c:Customer)
+  WITH benef,
+       collect(DISTINCT c.customerId) AS victims,
+       count(t)      AS transfers,
+       sum(t.amount) AS totalOut
+  WHERE size(victims) >= $min_victims
+  RETURN benef.accountNumber AS muleAccount,
+         size(victims)       AS victimCount,
+         victims,
+         transfers,
+         totalOut
+  ORDER BY totalOut DESC
 read_only: true

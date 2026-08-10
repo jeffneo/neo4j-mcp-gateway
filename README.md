@@ -1,5 +1,9 @@
 # Neo4j MCP Gateway
 
+> **Taking the lab?** You're on the `lab-start` branch — start with **[LAB.md](LAB.md)**.
+> The `gateway/` package is complete boilerplate; you build the `tools/*.yaml`.
+> Reference answers are in `solutions/`. (The `main` branch is the full solution.)
+
 A single local **MCP gateway** for Neo4j. Run it once, connect from VS Code and
 Claude Desktop, and get **two categories of tools behind one stdio endpoint**:
 

@@ -1,0 +1,51 @@
+# Forensic view of contact-detail changes (phone / email / address) with their
+# OLD vs NEW values — for investigating a takeover and restoring the victim.
+# Adapted from the Neo4j retail-banking ATO use case (section 5.6).
+# Registered as tool:  usecase_contact_change_history
+name: contact_change_history
+description: >
+  Forensic old-vs-new history of contact-detail changes (phone, email, address)
+  made during sessions, one row per change. Pass a customer_id to scope to one
+  customer, or leave it empty to see every change across all customers. Useful
+  for investigating an account takeover and restoring the victim's details.
+  Read-only.
+parameters:
+  - name: customer_id
+    type: string
+    description: Customer.customerId to investigate; empty string returns changes for all customers.
+    required: false
+    default: ""
+  - name: limit
+    type: integer
+    description: Maximum number of change rows to return.
+    required: false
+    default: 50
+cypher: |
+  MATCH (c:Customer)-[:HAS_SESSION]->(s:Session)
+  WHERE $customer_id = '' OR c.customerId = $customer_id
+  OPTIONAL MATCH (s)-[:HAS_CHANGE_PHONE]->(pc:ChangePhone)
+  OPTIONAL MATCH (pc)-[:OLD_PHONE]->(op:Phone)
+  OPTIONAL MATCH (pc)-[:NEW_PHONE]->(np:Phone)
+  OPTIONAL MATCH (s)-[:HAS_CHANGE_EMAIL]->(ec:ChangeEmail)
+  OPTIONAL MATCH (ec)-[:OLD_EMAIL]->(oe:Email)
+  OPTIONAL MATCH (ec)-[:NEW_EMAIL]->(ne:Email)
+  OPTIONAL MATCH (s)-[:HAS_CHANGE_ADDRESS]->(ac:ChangeAddress)
+  OPTIONAL MATCH (ac)-[:OLD_ADDRESS]->(oa:Address)
+  OPTIONAL MATCH (ac)-[:NEW_ADDRESS]->(na:Address)
+  WITH c, s, [x IN [
+      CASE WHEN pc IS NOT NULL THEN {type:'phone',   at:pc.createdAt, old:op.number,  new:np.number}  END,
+      CASE WHEN ec IS NOT NULL THEN {type:'email',   at:ec.createdAt, old:oe.address, new:ne.address} END,
+      CASE WHEN ac IS NOT NULL THEN {type:'address', at:ac.createdAt,
+             old:(oa.addressLine1 + ', ' + oa.postTown), new:(na.addressLine1 + ', ' + na.postTown)} END
+    ] WHERE x IS NOT NULL] AS changes
+  WHERE size(changes) > 0
+  UNWIND changes AS change
+  RETURN c.customerId AS customer,
+         s.sessionId  AS session,
+         change.type  AS changeType,
+         change.at    AS changeTime,
+         change.old   AS oldValue,
+         change.new   AS newValue
+  ORDER BY changeTime DESC
+  LIMIT $limit
+read_only: true

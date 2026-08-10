@@ -1,0 +1,34 @@
+# Surfaces logins from a device NOT previously trusted for that customer — the
+# classic first observable of an account takeover. Optionally filter to risky IPs.
+# Registered as tool:  usecase_new_device_logins
+name: new_device_logins
+description: >
+  List login sessions performed from a device that is not trusted for the
+  customer (USED_BY.isTrusted = false) — the hallmark first step of an account
+  takeover. Optionally restrict to sessions whose IP risk score is at least
+  min_ip_risk. Read-only.
+parameters:
+  - name: min_ip_risk
+    type: number
+    description: Only include sessions whose originating IP risk score is at least this value (0 = no filter).
+    required: false
+    default: 0
+cypher: |
+  MATCH (c:Customer)-[:HAS_SESSION]->(s:Session)-[:SESSION_USES_DEVICE]->(d:Device)-[u:USED_BY]->(c)
+  WHERE u.isTrusted = false
+  OPTIONAL MATCH (s)-[:USES_IP]->(ip:IP)
+  WITH c, s, d, u, ip
+  WHERE coalesce(ip.riskScore, 0) >= $min_ip_risk
+  RETURN c.customerId AS customer,
+         s.sessionId  AS session,
+         s.createdAt  AS at,
+         d.deviceId   AS device,
+         d.deviceType AS deviceType,
+         d.isEmulator AS emulator,
+         u.firstSeen  AS deviceFirstSeen,
+         ip.ipAddress AS ipAddress,
+         ip.riskScore AS ipRisk,
+         ip.isVpn     AS vpn,
+         ip.isTor     AS tor
+  ORDER BY coalesce(ipRisk, 0) DESC, at DESC
+read_only: true

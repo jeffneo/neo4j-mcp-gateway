@@ -1,0 +1,29 @@
+# =====================================================================
+#  WORKED EXAMPLE — the anatomy of a use-case tool. Copy this shape.
+#
+#  A tool is one YAML file with four parts:
+#    name        -> becomes the MCP tool name (prefixed 'usecase_')
+#    description -> what the model/analyst sees when choosing the tool
+#    parameters  -> become the tool's JSON inputSchema AND bind to $name in Cypher
+#    cypher      -> the query; every $name below matches a parameter above
+#    read_only   -> true = read transaction, false = write transaction
+#
+#  Test it instantly (no gateway restart, no MCP):
+#    uv run python scripts/try_tool.py customer_sessions customer_id=CUST-1004
+# =====================================================================
+name: customer_sessions
+description: List a customer's login sessions, newest first, with status and the device used.
+parameters:
+  - name: customer_id
+    type: string
+    description: The Customer.customerId to look up
+    required: true          # required params appear in the inputSchema 'required' list
+cypher: |
+  MATCH (c:Customer {customerId: $customer_id})-[:HAS_SESSION]->(s:Session)
+  OPTIONAL MATCH (s)-[:SESSION_USES_DEVICE]->(d:Device)
+  RETURN s.sessionId AS session,
+         s.status    AS status,
+         s.createdAt AS at,
+         d.deviceId  AS device
+  ORDER BY at DESC
+read_only: true

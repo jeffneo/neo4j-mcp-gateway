@@ -1,3 +1,9 @@
+# ##########################################################
+# EXERCISE — replace the cypher: block below with your query.
+# Reference answer: solutions/new_device_logins.yaml   (peek only if stuck!)
+# Test:  uv run python scripts/try_tool.py new_device_logins
+# ##########################################################
+
 # Surfaces logins from a device NOT previously trusted for that customer — the
 # classic first observable of an account takeover. Optionally filter to risky IPs.
 # Registered as tool:  usecase_new_device_logins
@@ -13,22 +19,11 @@ parameters:
     description: Only include sessions whose originating IP risk score is at least this value (0 = no filter).
     required: false
     default: 0
+# HINT:
+#   - (Customer)-[:HAS_SESSION]->(Session)-[:SESSION_USES_DEVICE]->(Device)-[u:USED_BY]->(same Customer).
+#   - Keep u.isTrusted = false. OPTIONAL MATCH the IP; filter coalesce(ip.riskScore,0) >= $min_ip_risk.
+#   - Gotcha: don't alias ip.ipAddress AS ip — it shadows the node. Order by the aliased column.
 cypher: |
-  MATCH (c:Customer)-[:HAS_SESSION]->(s:Session)-[:SESSION_USES_DEVICE]->(d:Device)-[u:USED_BY]->(c)
-  WHERE u.isTrusted = false
-  OPTIONAL MATCH (s)-[:USES_IP]->(ip:IP)
-  WITH c, s, d, u, ip
-  WHERE coalesce(ip.riskScore, 0) >= $min_ip_risk
-  RETURN c.customerId AS customer,
-         s.sessionId  AS session,
-         s.createdAt  AS at,
-         d.deviceId   AS device,
-         d.deviceType AS deviceType,
-         d.isEmulator AS emulator,
-         u.firstSeen  AS deviceFirstSeen,
-         ip.ipAddress AS ipAddress,
-         ip.riskScore AS ipRisk,
-         ip.isVpn     AS vpn,
-         ip.isTor     AS tor
-  ORDER BY coalesce(ipRisk, 0) DESC, at DESC
+  // TODO: implement new_device_logins. Parameters bind as $name. Keep it read-only.
+  RETURN 'TODO: implement new_device_logins' AS todo
 read_only: true
