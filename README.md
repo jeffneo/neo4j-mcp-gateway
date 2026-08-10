@@ -151,6 +151,18 @@ Malformed files fail loudly at startup with a message naming the file. Results
 are returned as JSON: `{ "count": N, "records": [ ... ] }`, with Neo4j temporal /
 spatial / graph values converted to JSON-friendly forms.
 
+**Fast dev loop** — test a tool without MCP or a gateway restart:
+
+```bash
+uv run python scripts/try_tool.py --list
+uv run python scripts/try_tool.py mule_hubs min_victims=2
+```
+
+`scripts/try_tool.py` runs one tool's Cypher through the same loader/executor the
+gateway uses, straight against Neo4j — so you get instant feedback while writing
+YAML. Use the MCP Inspector to check the tool over MCP, and a client (Claude
+Desktop) for the final integration.
+
 ---
 
 ## Restarting to pick up new tools
