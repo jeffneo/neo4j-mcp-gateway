@@ -9,7 +9,7 @@ detail lives in [`mediation-spec.md`](mediation-spec.md).
 
 ## 1. The problem (≈1 min)
 
-An AI assistant with database access is only safe if it can see exactly what the
+A solution with database access is only safe if it can see exactly what the
 person asking is allowed to see — no more, and no less.
 
 Two obvious approaches don't work for a bank:
@@ -18,7 +18,7 @@ Two obvious approaches don't work for a bank:
   the data has already left the database and entered the context window. And any
   aggregate it computed is wrong.
 - **Use the database's native roles.** Neo4j's RBAC is scoped to labels and
-  properties, not to *values in a row*. You cannot express "rows whose
+  properties, not to _values in a row_. You cannot express "rows whose
   `Permissions.Read` list contains one of my groups" without creating a role per
   combination of entitlements — which at bank cardinality isn't viable.
 
@@ -40,7 +40,7 @@ in this order:
   4. final RETURN            →  project or aggregate what survived
 ```
 
-The order is the whole point. The filter sits *between* the match and the return,
+The order is the whole point. The filter sits _between_ the match and the return,
 so **aggregates run after filtering** — a total is a total of the rows that caller
 is entitled to, not a firm-wide number with rows hidden from the list.
 
@@ -54,19 +54,20 @@ is entitled to, not a firm-wide number with rows hidden from the list.
 Authorization is expressed in three distinct places. Keeping them separate is what
 makes this reusable across use cases:
 
-| Layer | What it answers | Where |
-| --- | --- | --- |
-| **Configuration** | *How* is access enforced here? | `security:` block in each `bundle.yaml` |
-| **Identity** | *Who* is this caller, and what groups do they hold? | The graph — traversed at query time |
-| **Grants** | *Who* may read *this row*? | A list-valued property on each business record |
+| Layer             | What it answers                                     | Where                                          |
+| ----------------- | --------------------------------------------------- | ---------------------------------------------- |
+| **Configuration** | _How_ is access enforced here?                      | `security:` block in each `bundle.yaml`        |
+| **Identity**      | _Who_ is this caller, and what groups do they hold? | The graph — traversed at query time            |
+| **Grants**        | _Who_ may read _this row_?                          | A list-valued property on each business record |
 
 Note the asymmetry, because someone will ask about it: **identity is graph-native
 and transitive** (`(:User)-[:MEMBER_OF*]->(:AdGroup)`), while **grants are
 denormalised access-control lists** on the record itself. That's fast and it
 mirrors how source systems export entitlements — but it means a grant has no
-provenance. We can tell you *that* Joe has access, not *why* he was given it.
+provenance. We can tell you _that_ Joe has access, not _why_ he was given it.
 
 **Where it lives:**
+
 - Config — [`gateway/bundles.py`](../gateway/bundles.py): `SecurityPolicy`,
   `IdentityConfig`, `PrincipalConfig`
 - Identity graph — [`bundles/iam/data/iam_demo.cypher`](../bundles/iam/data/iam_demo.cypher)
@@ -102,7 +103,7 @@ mediated ([`gateway/server.py`](../gateway/server.py), enforced by
 `HideToolsMiddleware`).
 
 **Talking point:** this is why the pattern generalises. Entitlement isn't a
-property of "the IAM use case" — it's a property of *how a bundle exposes data*.
+property of "the IAM use case" — it's a property of _how a bundle exposes data_.
 Any bundle turns it on with one config line; the account-takeover bundle
 deliberately declares `mode: open` because its consumers are uniformly entitled.
 
@@ -114,12 +115,12 @@ Three properties worth stating explicitly, because each closes a specific failur
 
 **Filtering doesn't depend on the model.** An earlier version let the caller name
 which variables to authorize — meaning the LLM chose its own security parameter,
-and an incomplete list leaked rows. Now *every* variable a query produces is
+and an incomplete list leaked rows. Now _every_ variable a query produces is
 filtered, whatever the caller declared. → `compose()` in `mediation.py`.
 
 **Records without an access-control list are caught before production.** Anything
 carrying an ACL must match; anything without one is treated as reference data and
-flows. That's correct for clients and desks, but a *business record* missing its
+flows. That's correct for clients and desks, but a _business record_ missing its
 ACL would silently become world-readable — so each bundle declares which labels
 must always carry one, and validation fails if any don't.
 → `_check_protected_labels()` in [`scripts/validate_bundle.py`](../scripts/validate_bundle.py)
@@ -145,7 +146,7 @@ Say this before you're asked:
 - **Open-ended queries have a residual inference channel.** A generated fragment
   can, in principle, use a pattern as an existence test for data it can't read. We
   block the common forms; curated tools avoid the class entirely — which is why we
-  recommend them for production, and why a bundle can publish curated tools *only*.
+  recommend them for production, and why a bundle can publish curated tools _only_.
 - **Read-side only.** Mediation covers reads; mediated bundles are read-only by
   design rather than pretending to authorize writes.
 - **No provenance yet** (see §3). "Why does Joe have access?" needs the
@@ -164,8 +165,8 @@ Anna — who had a private chat with the client's treasurer — sees two. Joe, w
 simply isn't in his result. Then ask for a total notional and note that the number
 itself differs per caller.
 
-Close on the architecture point: *entitlements live in the graph, not in each
+Close on the architecture point: _entitlements live in the graph, not in each
 application. One endpoint serves every desk, and each person's assistant answers
-from exactly the rows they're cleared to see — including the aggregates.*
+from exactly the rows they're cleared to see — including the aggregates._
 
 Full script with expected output: [`bundles/iam/data/demo_prompts.md`](../bundles/iam/data/demo_prompts.md)
