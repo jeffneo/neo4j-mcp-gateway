@@ -6,7 +6,7 @@ gateway) and the model decides which gateway tool to use. Same graph, same tools
 as the Inspector runbook — but now it feels like asking a colleague.
 
 ### Before you start
-- Load the demo data (`data/ato_demo.cypher`) and **restart the gateway** so the
+- Load the demo data (`bundles/ato/data/ato_demo.cypher`) and **restart the gateway** so the
   `usecase_*` tools register.
 - In the client, be in **Agent mode** with the `neo4j-gateway` tools enabled.
 - Tip: if the model answers from memory instead of using a tool, nudge it with

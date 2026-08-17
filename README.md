@@ -411,6 +411,10 @@ It's idempotent and namespaced (`source:'ato-demo'`), so it won't disturb other
 data. See [`bundles/ato/data/README.md`](bundles/ato/data/README.md) for the roster,
 the ground-truth scoring fields, and copy-paste detection queries.
 
+**ATO demo:** [`bundles/ato/DEMO.md`](bundles/ato/DEMO.md) — quickest path to a
+working demo, plus the regression record proving the bundles refactor kept every
+capability (tool names and client configs are unchanged).
+
 **Running the lab:**
 - [`bundles/ato/data/README.md`](bundles/ato/data/README.md) — the **presenter
   runbook** (drives the tools explicitly; good with the MCP Inspector).

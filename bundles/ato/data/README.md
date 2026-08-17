@@ -1,5 +1,8 @@
 # ATO demo data
 
+> New here? Start with [`../DEMO.md`](../DEMO.md) for the quickest path and the
+> validated regression record.
+
 `ato_demo.cypher` generates a small, self-contained **account-takeover** dataset
 with enough *legitimate baseline* that anomalies are actually detectable — plus a
 deliberate false-positive so you can talk about precision, not just recall.
@@ -8,7 +11,7 @@ deliberate false-positive so you can talk about precision, not just recall.
 
 ```bash
 cypher-shell -a "$NEO4J_URI" -u "$NEO4J_USERNAME" -p "$NEO4J_PASSWORD" \
-             -d "$NEO4J_DATABASE" -f data/ato_demo.cypher
+             -d "$NEO4J_DATABASE" -f bundles/ato/data/ato_demo.cypher
 ```
 
 Every node it creates carries `source:'ato-demo'`; the script deletes that subset
@@ -87,7 +90,7 @@ assistant, plus the underlying tool + args).
 ### Setup (once, before the demo)
 1. **Wipe** the instance (dedicated demo DB only):
    `MATCH (n) DETACH DELETE n;`
-2. **Load** the data: `cypher-shell ... -f data/ato_demo.cypher`
+2. **Load** the data: `cypher-shell ... -f bundles/ato/data/ato_demo.cypher`
 3. **Restart** the gateway connector so the `usecase_*` tools register.
 
 Expected baseline: 6 customers, 16 sessions (12 normal + 3 ATO + 1 travel).
