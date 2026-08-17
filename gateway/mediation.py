@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 
 from fastmcp.exceptions import ToolError
 
@@ -151,28 +152,39 @@ def security_params(policy: SecurityPolicy, principal: str) -> dict[str, object]
 # Principal resolution
 # --------------------------------------------------------------------------- #
 
-def impersonation_allowed(policy: SecurityPolicy) -> bool:
-    """Impersonation needs the bundle to allow it, or the env flag to enable it."""
-    env = os.getenv("NEO4J_MCP_ALLOW_IMPERSONATION", "").strip().lower()
-    return policy.principal.allow_impersonation or env in {"true", "1", "yes"}
+def impersonation_allowed(policy: SecurityPolicy, env: Mapping[str, str] | None = None) -> bool:
+    """Impersonation needs the bundle to allow it, or the env flag to enable it.
+
+    ``env`` is the owning bundle's environment snapshot. With several bundles in
+    one process, os.environ only reflects whichever was resolved last, so callers
+    should pass ``config.env_snapshot``.
+    """
+    source = os.environ if env is None else env
+    flag = str(source.get("NEO4J_MCP_ALLOW_IMPERSONATION", "")).strip().lower()
+    return policy.principal.allow_impersonation or flag in {"true", "1", "yes"}
 
 
-def resolve_principal(policy: SecurityPolicy, requested: str | None = None) -> tuple[str, str]:
+def resolve_principal(
+    policy: SecurityPolicy,
+    requested: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
     """Resolve the caller. Returns ``(principal, source)``; raises if unknown.
 
     A caller-supplied ``requested`` principal is honoured only when impersonation
     is enabled — otherwise anyone could choose whose data they see.
     """
+    lookup = os.environ if env is None else env
     principal = source = ""
     for key in policy.principal.env:
-        value = os.getenv(key, "").strip()
+        value = str(lookup.get(key, "")).strip()
         if value:
             principal, source = value, f"env:{key}"
             break
 
     requested = (requested or "").strip()
     if requested:
-        if not impersonation_allowed(policy):
+        if not impersonation_allowed(policy, env):
             raise ToolError(
                 "principal override requires security.principal.allow_impersonation "
                 "or NEO4J_MCP_ALLOW_IMPERSONATION=true"

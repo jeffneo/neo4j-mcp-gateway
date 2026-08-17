@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gateway.config import Config
+from gateway.config import Config, active_bundle_names
 from gateway.yaml_tools import Neo4jExecutor, load_tool_specs, resolve_tool_query
 
 
@@ -95,7 +95,7 @@ def _check_entitlement_differentiation(config, executor, specs) -> int:
 
     from gateway import mediation
 
-    if not mediation.impersonation_allowed(policy):
+    if not mediation.impersonation_allowed(policy, config.env_snapshot):
         print("  SKIP  persona diff (needs NEO4J_MCP_ALLOW_IMPERSONATION=true "
               "or security.principal.allow_impersonation)")
         return 0
@@ -137,7 +137,15 @@ def _check_entitlement_differentiation(config, executor, specs) -> int:
 
 
 def main(argv: list[str]) -> int:
-    bundle = argv[0] if argv and not argv[0].startswith("-") else None
+    spec = argv[0] if argv and not argv[0].startswith("-") else None
+    names = active_bundle_names(spec)
+    if len(names) > 1:
+        # ACTIVE_BUNDLE may name several bundles; validate each in turn.
+        return max(_validate_one(n) for n in names)
+    return _validate_one(names[0])
+
+
+def _validate_one(bundle: str) -> int:
     config = Config.from_env(active_bundle=bundle)
 
     print(f"validating bundle '{config.active_bundle}'  "

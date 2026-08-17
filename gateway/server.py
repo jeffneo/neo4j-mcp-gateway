@@ -22,7 +22,7 @@ import sys
 from fastmcp import FastMCP
 
 from .bundles import list_bundles
-from .config import BUNDLES_DIR, Config
+from .config import BUNDLES_DIR, Config, resolve_configs
 from .middleware import HideToolsMiddleware
 from .proxy import build_downstream_proxy
 from .pytools import load_pytools
@@ -35,9 +35,56 @@ def _log(msg: str) -> None:
     print(f"[gateway] {msg}", file=sys.stderr, flush=True)
 
 
+def _check_connection_safety(configs: list[Config]) -> None:
+    """Refuse to serve an open bundle and a mediated bundle from one database.
+
+    Enforcement binds to the *connection*, not the bundle name. If an open bundle
+    shares a datasource with a mediated one, its unfiltered tools read the same
+    rows the mediated bundle is protecting — the entitlement guarantee is void.
+    Hiding tools cannot fix this, so it is a hard error rather than a warning.
+    """
+    by_connection: dict[tuple[str, str, str], list[Config]] = {}
+    for cfg in configs:
+        by_connection.setdefault(cfg.connection_key, []).append(cfg)
+
+    for key, group in by_connection.items():
+        modes = {c.security.mode for c in group}
+        if len(modes) > 1:
+            uri, user, database = key
+            names = ", ".join(f"{c.active_bundle}({c.security.mode})" for c in group)
+            raise SystemExit(
+                f"[gateway] REFUSING TO START: bundles with different security modes share one "
+                f"database.\n"
+                f"           datasource: {uri} db={database} user={user}\n"
+                f"           bundles:    {names}\n"
+                f"           An open bundle's unfiltered tools can read the rows the mediated "
+                f"bundle protects.\n"
+                f"           Fix: give them separate databases/instances (per-bundle .env), make "
+                f"both mediated, or serve them from separate gateway processes."
+            )
+
+
+def _compose_instructions(configs: list[Config]) -> str:
+    """Merge each bundle's model-facing instructions under a namespacing preamble."""
+    if len(configs) == 1:
+        return configs[0].instructions
+    parts = [
+        "This gateway serves several use cases at once. Tools are namespaced by "
+        "bundle: a tool named '<bundle>_...' belongs to that bundle and reads that "
+        "bundle's database. Use the section below matching the user's question, and "
+        "do not mix tools across bundles in a single line of reasoning.",
+    ]
+    for cfg in configs:
+        parts.append(f"## {cfg.active_bundle} (tools prefixed '{cfg.active_bundle}_')\n{cfg.instructions}")
+    return "\n\n".join(parts)
+
+
 def build_gateway(config: Config | None = None) -> FastMCP:
-    """Assemble the composite gateway server (proxy + YAML tools)."""
-    config = config or Config.from_env()
+    """Assemble the composite gateway server for one or more bundles."""
+    configs = [config] if config is not None else resolve_configs()
+    if len(configs) > 1:
+        return _build_multi_gateway(configs)
+    config = configs[0]
 
     _log(f"active bundle: {config.active_bundle}  ({config.bundle.description or 'no description'})")
     if config.security.mediated:
@@ -103,6 +150,85 @@ def build_gateway(config: Config | None = None) -> FastMCP:
         _log(f"registered {len(security_tools)} security tool(s): "
              f"{', '.join(t.name for t in security_tools)}")
 
+    return gateway
+
+
+def _build_multi_gateway(configs: list[Config]) -> FastMCP:
+    """Serve several bundles from one endpoint, each with its own connection.
+
+    Every bundle keeps an independent driver, so bundles may sit on different
+    databases or entirely different Neo4j instances. Tools are namespaced by
+    bundle name; the downstream official server is shared by bundles that point
+    at the same datasource rather than spawned once per bundle.
+    """
+    _check_connection_safety(configs)
+
+    names = ", ".join(c.active_bundle for c in configs)
+    _log(f"active bundles ({len(configs)}): {names}")
+
+    # Hidden names must carry each bundle's prefix, since mounts are namespaced.
+    hidden: list[str] = []
+    for cfg in configs:
+        prefix = f"{cfg.active_bundle}_"
+        for tool in cfg.hide_tools:
+            hidden.append(f"{prefix}{tool}")
+        if cfg.security.mediated and not cfg.security.allow_unmediated_read:
+            if f"{prefix}read-cypher" not in hidden:
+                hidden.append(f"{prefix}read-cypher")
+
+    gateway = FastMCP(
+        name=os.getenv("GATEWAY_NAME") or "neo4j-mcp-gateway",
+        instructions=_compose_instructions(configs),
+        middleware=[HideToolsMiddleware(hidden)] if hidden else [],
+    )
+
+    # One downstream child per distinct datasource. Bundles sharing a connection
+    # share its generic tools instead of spawning a redundant server each.
+    downstreams: dict[tuple[str, str, str], str] = {}
+
+    for cfg in configs:
+        prefix = f"{cfg.active_bundle}_"
+        posture = cfg.security.mode + (
+            "" if not cfg.security.mediated
+            else (" (exploration)" if cfg.security.expose_open_query_tool else " (curated only)")
+        )
+        _log(f"  [{cfg.active_bundle}] posture={posture} db={cfg.neo4j_database} uri={cfg.neo4j_uri}")
+
+        if cfg.connection_key not in downstreams:
+            gateway.mount(build_downstream_proxy(cfg), prefix=cfg.active_bundle)
+            downstreams[cfg.connection_key] = cfg.active_bundle
+            _log(f"  [{cfg.active_bundle}] mounted official tools as {prefix}get-schema, …")
+        else:
+            owner = downstreams[cfg.connection_key]
+            _log(f"  [{cfg.active_bundle}] shares {owner}'s datasource — reusing {owner}_* generic tools")
+
+        executor = Neo4jExecutor(cfg)
+        atexit.register(executor.close)
+
+        try:
+            registered = register_yaml_tools(gateway, cfg, executor, prefix=prefix)
+        except ToolSpecError as exc:
+            _log(f"ERROR loading YAML tools for '{cfg.active_bundle}': {exc}")
+            raise
+        if registered:
+            _log(f"  [{cfg.active_bundle}] {len(registered)} YAML tool(s): {', '.join(registered)}")
+
+        pytools, used_raw = load_pytools(cfg, executor)
+        for tool in pytools:
+            # Namespace code tools too, or two bundles' tools would collide.
+            gateway.add_tool(tool.model_copy(update={"name": f"{prefix}{tool.name}"}))
+        if pytools:
+            _log(f"  [{cfg.active_bundle}] {len(pytools)} code tool(s)")
+        if used_raw and cfg.security.mediated:
+            _log(f"  WARNING [{cfg.active_bundle}]: a code tool used the raw executor — that path "
+                 "is NOT entitlement-filtered.")
+
+        for tool in build_security_tools(cfg, executor, prefix):
+            gateway.add_tool(tool)
+            _log(f"  [{cfg.active_bundle}] security tool: {tool.name}")
+
+    if hidden:
+        _log(f"hiding proxied tool(s): {', '.join(hidden)}")
     return gateway
 
 

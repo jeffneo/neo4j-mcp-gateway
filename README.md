@@ -63,6 +63,32 @@ uv run python scripts/new_bundle.py <name>         # scaffold a new bundle
 ACTIVE_BUNDLE=<name> uv run python scripts/validate_bundle.py   # run all its tools
 ```
 
+### Serving several bundles at once
+
+`ACTIVE_BUNDLE` accepts a comma list. Each bundle keeps its **own connection**, so
+they may sit on different databases or entirely different Neo4j instances:
+
+```bash
+ACTIVE_BUNDLE=ato,iam uv run neo4j-mcp-gateway     # or --bundle ato,iam
+```
+
+Tools are then namespaced per bundle (`ato_mule_hubs`, `iam_client_activity`,
+`iam_secure-read-cypher`), and each bundle keeps its own security posture — in the
+example above `ato_read-cypher` stays available while `iam_read-cypher` is hidden.
+Bundles sharing a datasource share one downstream official server rather than
+spawning a redundant child. A single bundle behaves exactly as before (no bundle
+prefix), so nothing changes unless you opt in.
+
+> **Safety rule:** the gateway **refuses to start** if an `open` bundle and a
+> `mediated` bundle resolve to the same database. The open bundle's unfiltered
+> tools would read the very rows the mediated bundle protects, and no amount of
+> tool-hiding fixes that. Give them separate databases, make both mediated, or run
+> separate gateway processes.
+
+Two costs worth knowing: every bundle's `instructions` are concatenated (which
+dilutes tool selection — keep it to a handful of bundles), and each distinct
+datasource spawns its own downstream child.
+
 **Swap without editing files** — register one client entry per bundle, each pinned
 via `env`:
 
@@ -170,7 +196,7 @@ to both the downstream official server and the YAML tool executor.
 | `NEO4J_MCP_CMD` | `uvx neo4j-mcp-server` | How to launch the official downstream server |
 | `NEO4J_READ_ONLY` | *(unset)* | `true` disables downstream `write-cypher` |
 | `NEO4J_TELEMETRY` | `false` | Downstream telemetry opt-in |
-| `ACTIVE_BUNDLE` | `ato` | Which bundle under `bundles/` to serve |
+| `ACTIVE_BUNDLE` | `ato` | Bundle(s) to serve — comma list for several at once |
 | `EXPOSE_OPEN_QUERY_TOOL` | *(bundle)* | Set `false` to drop `secure-read-cypher` (tighten only) |
 | `USECASE_PREFIX` | `usecase_` | Tool-name prefix (also settable in `bundle.yaml`) |
 

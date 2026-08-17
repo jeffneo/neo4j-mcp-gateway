@@ -381,7 +381,7 @@ def resolve_tool_query(
 
     from . import mediation
 
-    resolved, _ = mediation.resolve_principal(policy, principal)
+    resolved, _ = mediation.resolve_principal(policy, principal, config.env_snapshot)
     query = mediation.compose(
         policy, spec.match_clause, spec.scope, spec.return_clause.strip(), spec.protect
     )
@@ -459,32 +459,41 @@ def build_yaml_tool(
     if mediated and config is not None:
         from . import mediation
 
-        if mediation.impersonation_allowed(policy):
+        if mediation.impersonation_allowed(policy, config.env_snapshot):
             schema["properties"]["principal"] = {
                 "type": "string",
                 "description": "Run as this principal (test impersonation; enabled for this deployment).",
             }
 
+    # Don't double a prefix the author already used: a tool called 'ato_lifecycle'
+    # in bundle 'ato' should stay 'ato_lifecycle', not become 'ato_ato_lifecycle'.
+    full_name = spec.name if spec.name.startswith(prefix) else f"{prefix}{spec.name}"
+
     return FunctionTool(
-        name=f"{prefix}{spec.name}",
+        name=full_name,
         description=description,
         parameters=schema,
         fn=_make_handler(spec, executor, config),
     )
 
 
-def register_yaml_tools(mcp: FastMCP, config: Config, executor: Neo4jExecutor) -> list[str]:
+def register_yaml_tools(
+    mcp: FastMCP, config: Config, executor: Neo4jExecutor, prefix: str | None = None
+) -> list[str]:
     """Discover YAML tools and register each on ``mcp``. Returns the tool names.
 
     Every tool name is prefixed (``usecase_`` by default) so use-case tools are
     namespaced distinctly from the proxied official tools and can never collide.
+    When several bundles share one gateway the caller passes the bundle's own
+    prefix instead, so tools from different bundles cannot collide either.
     """
     specs = load_tool_specs(config.tools_dir)
+    tool_prefix = prefix if prefix is not None else config.usecase_prefix
     registered: list[str] = []
     for spec in specs:
         if config.security.mediated:
             _check_mediated_spec(spec)
-        tool = build_yaml_tool(spec, executor, config.usecase_prefix, config)
+        tool = build_yaml_tool(spec, executor, tool_prefix, config)
         mcp.add_tool(tool)
         registered.append(tool.name)
     return registered

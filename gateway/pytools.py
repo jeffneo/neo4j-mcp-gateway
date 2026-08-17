@@ -71,7 +71,8 @@ class ToolContext:
         policy = self.config.security
         if not policy.mediated:
             raise RuntimeError("secure_run() requires security.mode: mediated")
-        resolved, _ = mediation.resolve_principal(policy, principal)
+        resolved, _ = mediation.resolve_principal(
+            policy, principal, self.config.env_snapshot)
         final = mediation.validate_final_return(final_return, scope)
         query = mediation.compose(policy, match_clause, scope, final, protect)
         merged = {**(params or {}), **mediation.security_params(policy, resolved)}

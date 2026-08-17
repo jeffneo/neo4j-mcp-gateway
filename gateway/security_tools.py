@@ -34,7 +34,7 @@ def _unique(values) -> list[str]:
 
 def _impersonation_param(config: Config) -> dict:
     """Expose a `principal` argument only when impersonation is actually enabled."""
-    if not mediation.impersonation_allowed(config.security):
+    if not mediation.impersonation_allowed(config.security, config.env_snapshot):
         return {}
     return {
         "principal": {
@@ -44,12 +44,13 @@ def _impersonation_param(config: Config) -> dict:
     }
 
 
-def build_resolve_identity(config: Config, executor: Neo4jExecutor) -> FunctionTool:
+def build_resolve_identity(config: Config, executor: Neo4jExecutor, prefix: str = "") -> FunctionTool:
     policy = config.security
     query = mediation.resolve_identity_query(policy)
 
     async def handler(**kwargs) -> dict:
-        principal, source = mediation.resolve_principal(policy, kwargs.get("principal"))
+        principal, source = mediation.resolve_principal(
+            policy, kwargs.get("principal"), config.env_snapshot)
         params = mediation.security_params(policy, principal)
         rows = executor.run(query, params, read_only=True)
 
@@ -78,7 +79,7 @@ def build_resolve_identity(config: Config, executor: Neo4jExecutor) -> FunctionT
         return result
 
     return FunctionTool(
-        name="resolve-identity",
+        name=f"{prefix}resolve-identity",
         description=(
             "Resolve the current caller and expand their entitlement groups into the set of "
             "principals used to filter every read. Call this first to establish who you are "
@@ -93,7 +94,7 @@ def build_resolve_identity(config: Config, executor: Neo4jExecutor) -> FunctionT
     )
 
 
-def build_secure_read_cypher(config: Config, executor: Neo4jExecutor) -> FunctionTool:
+def build_secure_read_cypher(config: Config, executor: Neo4jExecutor, prefix: str = "") -> FunctionTool:
     policy = config.security
 
     async def handler(**kwargs) -> dict:
@@ -113,7 +114,8 @@ def build_secure_read_cypher(config: Config, executor: Neo4jExecutor) -> Functio
             )
 
         final_return = mediation.validate_final_return(kwargs.get("finalReturn"), scope)
-        principal, _ = mediation.resolve_principal(policy, kwargs.get("principal"))
+        principal, _ = mediation.resolve_principal(
+            policy, kwargs.get("principal"), config.env_snapshot)
 
         user_params = kwargs.get("params") or {}
         for reserved in mediation.RESERVED_PARAMS:
@@ -129,7 +131,7 @@ def build_secure_read_cypher(config: Config, executor: Neo4jExecutor) -> Functio
         return {"principal": principal, "count": len(rows), "records": rows}
 
     return FunctionTool(
-        name="secure-read-cypher",
+        name=f"{prefix}secure-read-cypher",
         description=(
             "Run a read-only Cypher MATCH fragment inside the entitlement authorization "
             "wrapper. The fragment must NOT contain RETURN and may not use "
@@ -162,11 +164,16 @@ def build_secure_read_cypher(config: Config, executor: Neo4jExecutor) -> Functio
     )
 
 
-def build_security_tools(config: Config, executor: Neo4jExecutor) -> list[FunctionTool]:
-    """Engine tools for a mediated bundle (empty list when the bundle is open)."""
+def build_security_tools(
+    config: Config, executor: Neo4jExecutor, prefix: str = ""
+) -> list[FunctionTool]:
+    """Engine tools for a mediated bundle (empty list when the bundle is open).
+
+    ``prefix`` namespaces the tools when several bundles share one gateway.
+    """
     if not config.security.mediated:
         return []
-    tools = [build_resolve_identity(config, executor)]
+    tools = [build_resolve_identity(config, executor, prefix)]
     if config.security.expose_open_query_tool:
-        tools.append(build_secure_read_cypher(config, executor))
+        tools.append(build_secure_read_cypher(config, executor, prefix))
     return tools

@@ -29,7 +29,7 @@ from pathlib import Path
 # Make `gateway` importable even when run as `python scripts/try_tool.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gateway.config import Config
+from gateway.config import Config, active_bundle_names
 from gateway.yaml_tools import (Neo4jExecutor, ParamSpec, ToolSpec, load_tool_specs,
                                 resolve_tool_query)
 
@@ -59,14 +59,30 @@ def _print_list(specs: list[ToolSpec], prefix: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    config = Config.from_env()
+    # ACTIVE_BUNDLE may name several bundles; collect tools from each so the dev
+    # loop works the same whether one or many are active.
+    configs: list[Config] = []
+    for name in active_bundle_names():
+        try:
+            configs.append(Config.from_env(active_bundle=name))
+        except SystemExit as exc:
+            print(exc, file=sys.stderr)
+            return 1
 
-    try:
-        specs = load_tool_specs(config.tools_dir)
-    except Exception as exc:  # a malformed YAML file — the point of the fast loop
-        print(f"error loading tools from {config.tools_dir}:\n  {exc}", file=sys.stderr)
-        return 1
+    specs = []
+    owner: dict[str, Config] = {}
+    for cfg in configs:
+        try:
+            found = load_tool_specs(cfg.tools_dir)
+        except Exception as exc:  # a malformed YAML file — the point of the fast loop
+            print(f"error loading tools from {cfg.tools_dir}:\n  {exc}", file=sys.stderr)
+            return 1
+        for s in found:
+            if s.name not in owner:
+                owner[s.name] = cfg
+                specs.append(s)
 
+    config = configs[0]
     by_name = {s.name: s for s in specs}
 
     if not argv or argv[0] in ("-h", "--help"):
@@ -81,6 +97,8 @@ def main(argv: list[str]) -> int:
         name = name[len(config.usecase_prefix):]
 
     spec = by_name.get(name)
+    if spec is not None:
+        config = owner[spec.name]   # run against the bundle that owns the tool
     if spec is None:
         print(f"unknown tool {name!r} in {config.tools_dir}", file=sys.stderr)
         _print_list(specs, config.usecase_prefix)

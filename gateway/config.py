@@ -130,6 +130,21 @@ class Config:
     server_name: str = "neo4j-mcp-gateway"
     instructions: str = ""
 
+    # The environment as it stood when THIS bundle was resolved (root .env +
+    # this bundle's .env). Tools must read runtime settings from here rather than
+    # os.environ: with several bundles in one process, the global environment
+    # only reflects whichever bundle was resolved last.
+    env_snapshot: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def connection_key(self) -> tuple[str, str, str]:
+        """Identifies the datasource. Bundles sharing this share a database.
+
+        Enforcement is a property of the *connection*, not the bundle name — two
+        bundles on one key can reach each other's rows.
+        """
+        return (self.neo4j_uri, self.neo4j_username, self.neo4j_database)
+
     @property
     def downstream_argv(self) -> list[str]:
         argv = shlex.split(self.downstream_cmd)
@@ -231,4 +246,29 @@ class Config:
             security=policy or SecurityPolicy(mode="open"),
             server_name=os.getenv("GATEWAY_NAME") or manifest.name or "neo4j-mcp-gateway",
             instructions=manifest.instructions or default_instructions,
+            env_snapshot=dict(os.environ),
         )
+
+
+def active_bundle_names(spec: str | None = None) -> list[str]:
+    """Parse the active bundle selection: ``ACTIVE_BUNDLE`` accepts a comma list."""
+    raw = spec if spec is not None else os.getenv("ACTIVE_BUNDLE") or DEFAULT_BUNDLE
+    names = [n.strip() for n in raw.split(",") if n.strip()]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered or [DEFAULT_BUNDLE]
+
+
+def resolve_configs(spec: str | None = None) -> list[Config]:
+    """Resolve every active bundle into its own :class:`Config`.
+
+    Each bundle gets an independent connection, so bundles may live on different
+    databases or entirely different Neo4j instances. Resolution is sequential and
+    each pass undoes the previous bundle's ``.env`` (see
+    :func:`_undo_dotenv_injections`), so ordering cannot leak between them.
+    """
+    return [Config.from_env(active_bundle=name) for name in active_bundle_names(spec)]
