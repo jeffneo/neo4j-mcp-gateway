@@ -3,7 +3,7 @@
 A conceptual walkthrough of the entitlement model behind `secure-read-cypher` and
 the curated mediated tools. Aimed at a 5–10 minute introduction: what the model
 is, where each part lives, and what it does and doesn't guarantee. Implementation
-detail lives in [`mediation-spec.md`](mediation-spec.md).
+reference lives in [`mediation-spec.md`](mediation-spec.md).
 
 ---
 
@@ -113,10 +113,10 @@ deliberately declares `mode: open` because its consumers are uniformly entitled.
 
 Three properties worth stating explicitly, because each closes a specific failure:
 
-**Filtering doesn't depend on the model.** An earlier version let the caller name
-which variables to authorize — meaning the LLM chose its own security parameter,
-and an incomplete list leaked rows. Now _every_ variable a query produces is
-filtered, whatever the caller declared. → `compose()` in `mediation.py`.
+**Filtering doesn't depend on the model.** _Every_ variable a query produces is
+filtered, whatever the caller declared. If the boundary were a caller-supplied
+list, an LLM would be choosing its own security parameter and an incomplete list
+would leak rows. → `compose()` in `mediation.py`.
 
 **Records without an access-control list are caught before production.** Anything
 carrying an ACL must match; anything without one is treated as reference data and

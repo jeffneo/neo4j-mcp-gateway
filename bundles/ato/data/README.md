@@ -1,7 +1,6 @@
 # ATO demo data
 
-> New here? Start with [`../DEMO.md`](../DEMO.md) for the quickest path and the
-> validated regression record.
+> New here? [`../DEMO.md`](../DEMO.md) is the quickest path to a running demo.
 
 `ato_demo.cypher` generates a small, self-contained **account-takeover** dataset
 with enough *legitimate baseline* that anomalies are actually detectable — plus a

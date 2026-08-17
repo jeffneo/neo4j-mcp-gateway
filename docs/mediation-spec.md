@@ -1,131 +1,77 @@
-# Spec: entitlement mediation as an engine capability
+# Entitlement mediation — reference
 
-Status: **implemented**. Item 1 in commit `fca100a`, item 2 following it.
-Deviations from the original proposal are noted inline as **[as built]**.
-Covers two changes:
+How the gateway filters reads against a caller's entitlements: the configuration
+surface, the filtering semantics, where each part lives, and the known limits.
 
-1. **Derived protection** — remove "the model chooses its own security parameter."
-2. **`security:` config block + mediated YAML tools** — make entitlement filtering a
-   per-bundle, config-driven property of the engine rather than a bundle called `iam`.
+For a 5–10 minute conceptual introduction, read
+[`entitlements_implementation_model.md`](entitlements_implementation_model.md)
+instead — this document is the detailed reference behind it.
 
 ---
 
-## 0. Where policy lives (mental model)
+## 1. Where policy lives
 
-After this change, authorization is expressed in **three** places. Keeping them
-distinct is the whole design:
+Authorization is expressed in three distinct places. Keeping them separate is
+what makes the capability reusable across use cases:
 
-| Layer | Representation | Answers | Changed by |
+| Layer | Representation | Answers | Maintained by |
 | --- | --- | --- | --- |
 | **Configuration** | `bundle.yaml` → `security:` | *How* is access enforced? | Engineers, at deploy |
 | **Identity** | Graph traversal — `(:User)-[:MEMBER_OF*]->(:AdGroup)`, plus an inline list property | *Who* is this caller, and what groups do they hold? | Identity sync / SSO |
-| **Grants** | Denormalised ACL — list-valued `Permissions.Read` on each business record | *Who* may read *this row*? | Source systems / data pipeline |
+| **Grants** | Denormalised ACL — a list-valued property (default `Permissions.Read`) on each business record | *Who* may read *this row*? | Source systems / data pipeline |
 
-So the rules are a **hybrid**, not purely a graph: identity is graph-native and
-transitive; grants are embedded per-row ACLs. See §4 for the tradeoff and the
-seam left for a future path-based grant model.
+The rules are a hybrid rather than purely a graph: identity is graph-native and
+transitive; grants are embedded per-row ACLs. That is fast and mirrors how source
+systems export entitlements, at the cost of provenance — you can tell *that* a
+principal has access, not *why* it was granted. See §5 for the seam that a
+path-based grant model would use.
 
----
+## 2. Access modes
 
-## 1. Derived protection
+Every `bundle.yaml` must declare `security.mode`. There is no default, so an
+unfiltered bundle is a recorded decision rather than an omission.
 
-### Problem
-
-`secure-read-cypher` filters only the variables named in `protectedVariables`,
-which is supplied by the **caller (the LLM)**. Nothing forces that list to be
-complete. This leaks:
-
-```jsonc
-// fragment: MATCH (x:ResearchNote) MATCH (t:Trade)
-{ "protectedVariables": ["x"], "returnVariables": ["x","t"],
-  "finalReturn": "RETURN t.tradeId" }     // -> every trade, unfiltered
-```
-
-The same shape leaks through aggregates (`RETURN count(t)`).
-
-### Change
-
-The entitlement predicate applies to **every variable in scope** (protected ∪
-returned), not to a caller-supplied subset. `protectedVariables` becomes
-**optional and advisory** — useful for documenting intent and for forcing
-fail-closed on a specific variable — but it is no longer the security boundary.
-
-Per-variable rule, evaluated in the wrapper:
-
-| Variable state | Outcome | Rationale |
+| Mode | Behaviour | Use when |
 | --- | --- | --- |
-| `null` | pass | `OPTIONAL MATCH` miss |
-| carries the permissions property | must intersect caller principals | the grant |
-| lacks it | pass | reference data (Client, AdGroup, Desk…) flows |
-| lacks it **but** holds a `protected_labels` label | **deny** | data-quality guard, fail closed |
+| `open` | Tools read the graph directly. | Every consumer of this bundle is uniformly entitled to all of its data. |
+| `mediated` | Every read is wrapped in an authorization prelude and filtered against the caller's principals. | Callers are entitled to different subsets. |
 
-Predicate shape (property access works on nodes *and* relationships, so no type
-introspection is required in the hot path):
+Under `mediated` the engine:
 
-```cypher
-WITH authz, <scope>
-WHERE all(r IN [<every scope variable>] WHERE
-      r IS NULL
-   OR ( r[$__secure_perm_prop] IS NOT NULL
-        AND any(p IN r[$__secure_perm_prop] WHERE p IN authz.authzPrincipals) )
-   OR ( r[$__secure_perm_prop] IS NULL AND <not protected-label> )
-)
-```
+1. registers `resolve-identity`, and `secure-read-cypher` when
+   `expose_open_query_tool` is true;
+2. composes every curated YAML tool with the prelude and entitlement filter;
+3. hides the proxied `read-cypher` (it would bypass the filter) unless
+   `allow_unmediated_read` is explicitly set, which logs a prominent warning;
+4. defaults the downstream official server to read-only — mediation covers reads,
+   so an unmediated `write-cypher` alongside a filtered read path is incoherent;
+5. requires tools to use the mediated authoring form (§4) and to be read-only.
 
-**Implementation note.** The `protected_labels` arm needs `labels(r)`, which errors
-on relationships. Two options: (a) verify `valueType()` availability on the target
-Neo4j version and guard with it, or (b) — **recommended** — keep the hot path
-property-only and enforce the fail-closed guarantee as a *validation* check
-(§3.4) rather than at query time. Option (b) is portable and moves a data-quality
-problem out of the request path.
+### Postures
 
-### Known limitation: inference channels
+| Posture | Config | Who writes the Cypher |
+| --- | --- | --- |
+| Open | `mode: open` | Humans; unfiltered |
+| Exploration | `mode: mediated` | Humans and the model |
+| Curated only | `mode: mediated`, `expose_open_query_tool: false` | Humans only |
 
-Scope-based filtering cannot stop an *existence oracle* in an open-ended fragment:
+`EXPOSE_OPEN_QUERY_TOOL=false` in the environment tightens a deployment to
+curated-only at runtime. It can only tighten: a bundle that declares
+`expose_open_query_tool: false` cannot be re-opened from the shell. The active
+posture is printed in the gateway's startup log.
 
-```cypher
-MATCH (x:ResearchNote) WHERE EXISTS { MATCH (t:Trade {tradeId:'TRD-3001'}) }
-```
-
-`t` never enters scope, so no filter applies, yet its existence changes the result.
-**Mitigation:** in mediated mode, extend the fragment blocklist to reject
-`EXISTS {`, `COUNT {`, and inline pattern predicates in `WHERE`. Document the
-residual risk honestly — this is a general property of query mediation, and it is
-the strongest argument for preferring **curated (YAML) mediated tools** in
-production, with the open-ended tool reserved for exploration.
-
-### Not covered
-
-Relationship-level ACLs. A relationship is only bindable if its endpoints matched,
-so this is acceptable, but it should be stated rather than implied.
-
----
-
-## 2. `security:` block and mediated YAML tools
-
-### 2.1 IAM stops being a bundle
-
-| Today | After |
-| --- | --- |
-| `bundles/iam/pytools/iam_tools.py` defines `resolve-identity` + `secure-read-cypher` | Both move into the **engine**, registered whenever a bundle is mediated |
-| Enforcement is a property of "the IAM bundle" | Enforcement is a property of a bundle's **datasource**, declared in config |
-| `bundles/iam/` is the security mechanism | `bundles/iam/` is a **demo bundle** that happens to enable mediation |
-
-Bundles never depend on other bundles. The capability lives in the engine; bundles
-opt in. This avoids bundle-to-bundle dependency ordering and versioning entirely.
-
-### 2.2 Config schema
+## 3. Configuration surface
 
 ```yaml
 security:
-  mode: mediated                 # open | mediated. Default open, WARNED loudly at startup.
+  mode: mediated                 # REQUIRED: open | mediated
   permissions_property: "Permissions.Read"
   protected_labels: [Communication, Request, Trade, Deal]
 
   principal:
     env: [NEO4J_MCP_PRINCIPAL, NEO4J_MCP_AUTH_SUBJECT, USER_EMAIL]
     everyone: everyone
-    allow_impersonation: false   # env NEO4J_MCP_ALLOW_IMPERSONATION may enable; never in prod
+    allow_impersonation: false   # demo only; NEO4J_MCP_ALLOW_IMPERSONATION may also enable
 
   identity:                      # how to resolve a principal into authzPrincipals
     labels: [User, Principal]
@@ -134,31 +80,41 @@ security:
     group_name_keys: [name, group, displayName, email, mail, id]
     inline_group_list: AdGroupList
 
-  expose_open_query_tool: true   # register secure-read-cypher (text2cypher path)
-                                 # [as built] EXPOSE_OPEN_QUERY_TOOL=false may
-                                 # tighten this at runtime, never loosen it
-  allow_unmediated_read: false   # must be explicitly true to keep raw read-cypher
+  expose_open_query_tool: true   # register secure-read-cypher
+  allow_unmediated_read: false   # keep raw read-cypher (defeats the guarantee)
 ```
 
-Engine behaviour when `mode: mediated`:
+Everything under `identity:` is a graph-shape detail, so a bundle whose identity
+model uses different labels, relationships or property names can be mediated
+without code. Connection details are never configured here — they come from
+`.env` only (root, then the bundle's own).
 
-1. Register `resolve-identity`, and `secure-read-cypher` if `expose_open_query_tool`.
-2. Wrap **every YAML tool** in the auth prelude + entitlement filter.
-3. Hide proxied `read-cypher` unless `allow_unmediated_read: true` (which logs a
-   prominent warning — it defeats the guarantee).
-4. Force downstream `read_only: true` by default. Mediation covers **reads only**;
-   an unmediated `write-cypher` alongside a mediated read path is incoherent.
-5. Reject at load: any YAML tool with `read_only: false` (see 2.3).
+Parsed by `SecurityPolicy`, `IdentityConfig` and `PrincipalConfig` in
+[`../gateway/bundles.py`](../gateway/bundles.py).
 
-`mode: open` is unchanged behaviour — but must now be *stated*. Omitting `security:`
-defaults to open **and logs a warning naming the bundle**, converting today's silent
-default into a recorded decision. The scaffolder template ships `mode: open` explicitly.
+## 4. Filtering semantics
 
-### 2.3 Mediated YAML tool schema
+Each mediated read is assembled as: **authorization prelude → the query's match
+part → entitlement filter → final RETURN**. The filter sits between the match and
+the return, so aggregates are computed over only the rows the caller may see.
 
-To wrap a YAML tool we must know where its `RETURN` begins. **Parsing Cypher is
-not acceptable** (WITH chains, subqueries, multiple RETURNs). Instead, mediated
-tools are authored in fragment + final-return form, mirroring `secure-read-cypher`:
+The filter applies to **every variable the query produces**, not to a list the
+caller supplied — security cannot depend on what a model declared:
+
+| Variable state | Outcome | Rationale |
+| --- | --- | --- |
+| `null` | pass | `OPTIONAL MATCH` miss |
+| carries the permissions property | must intersect the caller's principals | the grant |
+| lacks it | pass | reference data (Client, AdGroup, Desk…) must flow for joins |
+| explicitly listed in `protect` / `protectedVariables` | **strict**: must carry an ACL *and* match | opt-in fail-closed |
+
+Composition lives in `compose()` in [`../gateway/mediation.py`](../gateway/mediation.py);
+`_PRELUDE` and `_FILTER` in the same module are the two templates.
+
+### Authoring a mediated tool
+
+The engine never parses Cypher to locate the `RETURN` — mis-locating it would be
+a security bug — so mediated tools declare the split:
 
 ```yaml
 name: acme_trades
@@ -167,106 +123,68 @@ parameters:
   - name: client
     type: string
     required: true
-match: |                          # no RETURN; may use MATCH/OPTIONAL MATCH/WHERE/WITH
+match: |                          # no RETURN; MATCH / OPTIONAL MATCH / WHERE / WITH
   MATCH (t:Trade)-[:FOR_CLIENT]->(c:Client {name: $client})
-scope: [t, c]                     # [as built] REQUIRED: variables carried match -> return
-protect: [t]                      # optional, advisory (see §1)
+scope: [t, c]                     # variables carried from match into return; all are filtered
+protect: [t]                      # optional strict subset
 return: |                         # runs AFTER filtering — aggregates belong here
   RETURN t.tradeId AS tradeId, t.notional AS notional
-read_only: true                   # required true in mediated mode
-sample_args:                      # [as built] optional; lets CI exercise a tool
+read_only: true                   # required in a mediated bundle
+sample_args:                      # optional; lets validate_bundle exercise a tool
   client: "Acme Corp"             #   that has required parameters
 ```
 
-**[as built] `scope:` is required.** The engine must know which variables to carry
-out of the match subquery and into the filter, and deriving that would mean
-parsing Cypher. Declaring it is one line and keeps the composition exact.
+The single-block `cypher:` form remains valid in `open` bundles; in a mediated
+bundle it is a load error naming the file and showing the conversion.
 
-**[as built] `sample_args:`** — validation-only arguments so a tool with required
-parameters is still exercised and persona-diffed by `validate_bundle.py`. Without
-it, the most interesting tools are the ones CI skips.
+### Code tools
 
-Compatibility rules:
+The engine cannot auto-wrap arbitrary Python, so a code tool that reads business
+records calls `ToolContext.secure_run()`
+([`../gateway/pytools.py`](../gateway/pytools.py)). Reaching for the raw executor
+is permitted for reference data but is recorded, and the server warns at startup
+when a mediated bundle's code tools took an unfiltered path.
 
-- `cypher:` (today's single-block form) stays valid in **open** bundles — ATO needs
-  no migration.
-- `cypher:` in a **mediated** bundle is a **load error** with a message telling the
-  author to split it into `match:`/`return:`. Explicit beats a fragile auto-split.
-- A bundle may mix both forms only while `mode: open`.
+## 5. Validation
 
-Reserved parameter names (`__secure_*`) are rejected in `parameters:`.
+`scripts/validate_bundle.py` performs two entitlement-specific checks against a
+live database, in addition to running every tool:
 
-### 2.4 Code tools (pytools) under mediation
+- **Fail-closed data guard** — a business record carrying a `protected_labels`
+  label but *missing* its ACL would flow to everyone as reference data. The check
+  fails when any such record exists, catching the problem in CI rather than in
+  production. Run it after every data load.
+- **Persona differentiation** — a filter returning the same rows for everyone is
+  indistinguishable from no filter, so each mediated tool is run as several real
+  principals and the results compared.
 
-The engine cannot auto-wrap arbitrary Python. Therefore:
+## 6. Known limits
 
-- `ToolContext` gains `secure_run(match, params, protect=None, final_return=None)` —
-  the same composed path the engine uses — so code tools can opt in deliberately.
-- At startup in mediated mode, log a warning naming any pytool that touched the raw
-  executor, so unmediated code paths are visible rather than assumed safe.
+- **The gateway is the enforcement boundary**, not the database. Anyone with
+  direct database credentials is bounded only by Neo4j's own auth.
+- **Inference channels.** A model-generated fragment can in principle use a
+  pattern as an existence test for data it cannot read. `EXISTS`, `COUNT`,
+  `COLLECT` and `CALL` subquery expressions are blocked, but inline pattern
+  predicates in `WHERE` remain. Curated tools avoid the class entirely, and the
+  curated-only posture (§2) removes it outright.
+- **Read-side only.** Mediated bundles are read-only by design.
+- **Relationship-level ACLs are not supported.** A relationship is only bindable
+  when its endpoints matched, so this is acceptable but worth stating.
+- **No provenance.** Grants are values in a list, with no grantor or date (§1).
 
-### 2.5 Worked example — `entitlement_directory` under mediation
+## 7. Deliberately not included
 
-Converted form; `AdGroup`/`User` carry no permissions property and are not in
-`protected_labels`, so they flow as reference data, and the aggregation correctly
-runs post-filter:
+Left out until a concrete requirement justifies them; the design does not
+preclude any of them:
 
-```yaml
-match: |
-  MATCH (g:AdGroup)
-  WHERE $group_name = '' OR g.name = $group_name
-  OPTIONAL MATCH (u:User)-[:MEMBER_OF]->(g)
-return: |
-  RETURN g.name AS group, g.kind AS kind, count(u) AS memberCount, collect(u.email) AS members
-```
-
----
-
-## 3. Implementation plan
-
-| # | Change | Files | Notes |
-| --- | --- | --- | --- |
-| 3.1 | `SecurityPolicy` dataclass + parsing | `gateway/bundles.py`, `config.py` | Validation errors name the bundle |
-| 3.2 | Extract mediation engine | new `gateway/mediation.py` | Prelude + filter composition, parameterised by policy; **template the predicate**, don't hardcode it (see §4) |
-| 3.3 | Engine-provided tools | move from `bundles/iam/pytools/` | `resolve-identity`, `secure-read-cypher` |
-| 3.4 | YAML `match:`/`return:`/`protect:` support + mediated wrapping | `gateway/yaml_tools.py` | Load-time rejection of `cypher:` when mediated |
-| 3.5 | Auto-hide + read-only defaults | `gateway/server.py`, `middleware.py` | Per-**connection**, not per bundle name |
-| 3.6 | Validation | `scripts/validate_bundle.py` | (a) every `protected_labels` node has the permissions property; (b) run each mediated tool as ≥2 personas and assert the result sets differ / are subsets — a genuine entitlement regression test |
-| 3.7 | Bundle migration | `bundles/iam/*`, `bundles/ato/bundle.yaml`, `_template` | IAM → `mode: mediated`, delete its pytools, convert its YAML tool; ATO → explicit `mode: open` |
-
-Effort: 3.1–3.3 are mostly relocation of working code. 3.4 is the only substantive
-new logic. 3.6 is small and high-value. Docs (`bundles/iam/README.md`,
-`data/demo_prompts.md`, root README) follow.
-
-**Verification bar** (same as prior work): Neo4j 5.x **Enterprise + APOC** in a
-throwaway container; assert the published entitlement matrix per principal;
-assert the §1 leak vector now returns nothing; assert ATO is byte-for-byte
-unchanged in behaviour.
-
----
-
-## 4. Deliberately out of scope
-
-Left out to avoid overengineering, but the design must not preclude them:
-
-- **Path-based / derived grants** — e.g. access implied by
+- **Path-based / derived grants** — access implied by a traversal such as
   `(t:Trade)-[:FOR_CLIENT]->(c:Client)<-[:COVERS]-(u:User)` rather than a
-  materialised ACL. This is the graph-native model: entitlements as *paths*, which
-  gives provenance ("Joe sees this because he covers the client") and avoids
-  rewriting millions of rows on a regrant. **Seam:** make the filter predicate a
-  configurable template in 3.2 so a `grant_model: property | path` option can drop
-  in later without touching the composition logic.
-- **Explainability tool** (`explain-access`) — natural once path grants exist.
+  materialised ACL. This is the graph-native model: it yields provenance ("this
+  caller sees it because they cover the client") and avoids rewriting many rows on
+  a regrant. **The seam** is the single predicate in `_FILTER`; it is templated so
+  a `grant_model: property | path` option can be added without touching
+  composition.
+- **An `explain-access` tool** — natural once path grants exist.
 - Principal-resolution caching (a traversal per call is fine at demo scale).
-- Field/property-level redaction; write-side authorization; policy inheritance;
-  ABAC/ReBAC engines. All need a real customer requirement first.
-
-## 5. Open questions
-
-1. **Default posture** — spec says `open` + loud warning (non-breaking). A stricter
-   reading for a bank reference architecture: make `security.mode` *required*, so
-   every bundle states its posture. Breaking, but arguably correct.
-2. **`get-schema` under mediation** — currently left exposed because text2cypher
-   needs it. It discloses structure (labels, property keys), not rows. Acceptable?
-3. **Fail-closed guard** — validation-time (portable, recommended) vs runtime label
-   check (stronger, needs `valueType()` verification on the target version).
+- Field-level redaction, write-side authorization, policy inheritance, and
+  general ABAC/ReBAC engines.

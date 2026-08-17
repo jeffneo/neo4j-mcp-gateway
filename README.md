@@ -44,7 +44,7 @@ bundles/<name>/
   tools/*.yaml    # static parameterized use-case tools
   pytools/*.py    # optional code-backed tools (build_tools(ctx) -> [Tool]) for
                   #   logic that isn't static Cypher
-  data/*.cypher   # demo dataset generator(s) + lab docs
+  data/*.cypher   # demo dataset generator(s) + demo docs
 ```
 
 Pick the active bundle with `ACTIVE_BUNDLE` (or `--bundle`). The engine points the
@@ -144,7 +144,7 @@ fails when a business record is missing its access-control list — otherwise su
 record silently flows to everyone. The validator also persona-diffs mediated tools
 to prove the filter actually discriminates between callers.
 
-Design rationale and known limits: [`docs/mediation-spec.md`](docs/mediation-spec.md).
+Full reference and known limits: [`docs/mediation-spec.md`](docs/mediation-spec.md).
 
 > **Note:** `get-schema` stays exposed even under `mediated`, because
 > text-to-Cypher needs it. It reveals structure (labels, relationship types,
@@ -153,8 +153,8 @@ Design rationale and known limits: [`docs/mediation-spec.md`](docs/mediation-spe
 
 Shipped bundles: **`ato`** (account-takeover; 7 YAML tools; `mode: open`) and
 **`iam`** (investment-bank entitlements; `mode: mediated`, curated tools filtered
-per caller, raw `read-cypher` auto-hidden). Note the IAM bundle contains **no
-security code** — it declares a policy and the engine does the rest.
+per caller, raw `read-cypher` auto-hidden). Neither bundle contains security
+code — a bundle declares a policy and the engine enforces it.
 
 ---
 
@@ -309,12 +309,12 @@ the gateway is running:
     run *MCP: List Servers → neo4j-gateway → Restart* from the command palette.
   - **Claude Desktop:** toggle the connector off/on (or quit and reopen Claude).
 - **Running it yourself in a terminal (e.g. testing with the Inspector):** a
-  single **Ctrl+C** now stops it immediately. (Earlier it took several Ctrl+C
-  because the shutdown waited on the downstream child; the gateway now installs
-  a fast SIGINT/SIGTERM handler that exits at once and lets the child close via
-  stdin-EOF.) `kill <pid>` (SIGTERM) also works instantly.
+  single **Ctrl+C** stops it immediately — the gateway installs a fast
+  SIGINT/SIGTERM handler that exits at once and lets the downstream child close
+  via stdin-EOF, rather than blocking on an async teardown. `kill <pid>`
+  (SIGTERM) works the same way.
 
-If you ever see leftover `neo4j-mcp-server` processes from older sessions:
+If you ever see leftover `neo4j-mcp-server` processes from an earlier session:
 
 ```bash
 pgrep -fl 'neo4j-mcp-server|neo4j-mcp-gateway'   # inspect first
@@ -381,9 +381,9 @@ Claude Desktop has no `${workspaceFolder}` and does **not** inherit your shell
 > Tip: you can add an `"env": { "NEO4J_URI": "…", "NEO4J_PASSWORD": "…" }` block
 > here instead of using `.env` if you prefer per-client credentials.
 
-### Sharing this as a lab demo
+### Sharing this repo
 
-The repo is self-contained — an attendee only needs, per machine:
+The repo is self-contained — a new user only needs, per machine:
 
 ```bash
 git clone <repo-url> neo4j-mcp-gateway
@@ -393,7 +393,7 @@ uv sync                       # creates the venv; uvx fetches the downstream on 
 code .                        # open THIS folder in VS Code, then MCP: List Servers → Start
 ```
 
-Prerequisites they need installed: **Python 3.11+**, **[uv](https://docs.astral.sh/uv/)**,
+Prerequisites: **Python 3.11+**, **[uv](https://docs.astral.sh/uv/)**,
 and (for the Inspector smoke test) **Node/npx**. No absolute paths to edit for the
 VS Code flow; only the Claude Desktop config needs their own two paths.
 
@@ -412,15 +412,14 @@ data. See [`bundles/ato/data/README.md`](bundles/ato/data/README.md) for the ros
 the ground-truth scoring fields, and copy-paste detection queries.
 
 **ATO demo:** [`bundles/ato/DEMO.md`](bundles/ato/DEMO.md) — quickest path to a
-working demo, plus the regression record proving the bundles refactor kept every
-capability (tool names and client configs are unchanged).
+working demo: load, verify, serve, and the results to expect.
 
-**Running the lab:**
+**Demo docs:**
 - [`bundles/ato/data/README.md`](bundles/ato/data/README.md) — the **presenter
   runbook** (drives the tools explicitly; good with the MCP Inspector).
 - [`bundles/ato/data/demo_prompts.md`](bundles/ato/data/demo_prompts.md) —
   **conversational prompts** to paste into Claude Desktop so the model orchestrates
-  the tools itself. This is the intended payoff of the lab.
+  the tools itself — the assistant picks the tools and narrates the investigation.
 
 ---
 
@@ -447,7 +446,7 @@ neo4j-mcp-gateway/
     ato/              # account-takeover bundle
       bundle.yaml     #   metadata + non-secret config
       tools/*.yaml    #   the 7 ATO tools
-      data/           #   ato_demo.cypher + lab docs
+      data/           #   ato_demo.cypher + demo docs
     iam/              # investment-bank entitlements bundle
       bundle.yaml     #   security.mode: mediated + protected_labels
       tools/*.yaml    #   curated mediated tools (match/scope/return)

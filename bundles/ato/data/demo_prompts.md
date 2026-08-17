@@ -1,6 +1,6 @@
 # Conversational demo — investigating ATO from a chat client
 
-This is the payoff of the lab: instead of calling tools by name, an analyst just
+The payoff: instead of calling tools by name, an analyst just
 **talks to Claude** (Claude Desktop, or any MCP chat client connected to the
 gateway) and the model decides which gateway tool to use. Same graph, same tools
 as the Inspector runbook — but now it feels like asking a colleague.

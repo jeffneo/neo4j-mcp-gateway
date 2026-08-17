@@ -1,9 +1,9 @@
 # IAM bundle — entitlement-aware graph access
 
 A tier-1 investment-bank **entitlements** use case. SSO names the user, the graph
-resolves their effective entitlement groups, and **`secure-read-cypher`** composes
-an authorization wrapper around a generated Cypher fragment before Neo4j runs it.
-Adapted from the Go IAM MCP fork to this gateway's Python pattern.
+resolves their effective entitlement groups, and the gateway composes an
+authorization wrapper around every read before Neo4j runs it — so each caller
+sees exactly the rows they are entitled to, including in aggregates.
 
 Run the demo: **[`data/demo_prompts.md`](data/demo_prompts.md)** (four scenarios,
 exact tool calls, verified expected output).
@@ -48,9 +48,9 @@ form so the engine inserts the filter between match and return:
 - **`entitlement_directory`** — identity/reference metadata (groups and members),
   no business records.
 
-**Hidden:** raw `read-cypher` — automatically, because mediation is on (no
-`downstream.hide` entry needed) — and `write-cypher` via
-`downstream.read_only: true`, so the official server never registers it.
+**Hidden:** raw `read-cypher`, hidden automatically because mediation is on — it
+would bypass the filter — and `write-cypher`, which the official server never
+registers because `downstream.read_only` is true.
 
 ## Run it
 
