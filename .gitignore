@@ -1,4 +1,5 @@
 # Secrets — ignore every .env variant EXCEPT the checked-in example
+# (the bare `.env` pattern also matches per-bundle bundles/*/.env)
 .env
 .env.*
 !.env.example

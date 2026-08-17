@@ -1,0 +1,20 @@
+# SKELETON — implement the cypher: block. Test:
+#   ACTIVE_BUNDLE=iam uv run python scripts/try_tool.py effective_access user_id=U-1001
+name: effective_access
+description: >
+  Show every permission a user effectively holds and the resource it targets,
+  whether granted directly (HAS_ROLE) or via group membership (MEMBER_OF ->
+  GRANTS), including the role and resource sensitivity.
+parameters:
+  - name: user_id
+    type: string
+    description: The User.userId to expand
+    required: true
+# HINT:
+#   - Direct:  (u:User {userId:$user_id})-[:HAS_ROLE]->(role)
+#   - Via group: (u)-[:MEMBER_OF]->(:Group)-[:GRANTS]->(role)
+#   - Then (role)-[:ALLOWS]->(:Permission)-[:ON]->(:Resource). UNION the two paths.
+cypher: |
+  // TODO: implement effective_access. Params bind as $user_id. Keep it read-only.
+  RETURN 'TODO: implement effective_access' AS todo
+read_only: true

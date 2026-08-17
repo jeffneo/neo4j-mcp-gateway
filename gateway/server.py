@@ -21,7 +21,8 @@ import sys
 
 from fastmcp import FastMCP
 
-from .config import Config
+from .bundles import list_bundles
+from .config import BUNDLES_DIR, Config
 from .proxy import build_downstream_proxy
 from .yaml_tools import Neo4jExecutor, ToolSpecError, register_yaml_tools
 
@@ -35,17 +36,12 @@ def build_gateway(config: Config | None = None) -> FastMCP:
     """Assemble the composite gateway server (proxy + YAML tools)."""
     config = config or Config.from_env()
 
-    gateway = FastMCP(
-        name=config.server_name,
-        instructions=(
-            "Neo4j gateway. Generic tools (get-schema, read-cypher, write-cypher, "
-            "list-gds-procedures) are proxied from the official Neo4j MCP server. "
-            f"Curated, parameterized use-case tools are prefixed '{config.usecase_prefix}'."
-        ),
-    )
+    _log(f"active bundle: {config.active_bundle}  ({config.bundle.description or 'no description'})")
+
+    gateway = FastMCP(name=config.server_name, instructions=config.instructions)
 
     # 1) Proxy the official downstream server and mount its tools unchanged.
-    _log(f"downstream command: {config.downstream_cmd}")
+    _log(f"downstream command: {config.downstream_cmd}  (database: {config.neo4j_database})")
     proxy = build_downstream_proxy(config)
     gateway.mount(proxy)
     _log("mounted official Neo4j MCP tools (get-schema, read-cypher, write-cypher, list-gds-procedures)")
@@ -91,7 +87,24 @@ def _install_fast_shutdown() -> None:
 
 
 def main() -> None:
-    """Console-script / module entrypoint: build the gateway and serve over stdio."""
+    """Console-script / module entrypoint: build the gateway and serve over stdio.
+
+    Flags:
+      --list-bundles      print available bundles and exit
+      --bundle <name>     select the active bundle (same as ACTIVE_BUNDLE=<name>)
+    """
+    argv = sys.argv[1:]
+
+    if "--list-bundles" in argv:
+        for b in list_bundles(BUNDLES_DIR):
+            print(f"{b.name:20}  {b.description}")
+        return
+
+    if "--bundle" in argv:
+        i = argv.index("--bundle")
+        if i + 1 < len(argv):
+            os.environ["ACTIVE_BUNDLE"] = argv[i + 1]
+
     gateway = build_gateway()
     _install_fast_shutdown()
     _log("serving on stdio (Ctrl+C to stop)")

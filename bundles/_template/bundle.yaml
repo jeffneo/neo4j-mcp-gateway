@@ -1,0 +1,17 @@
+# Bundle manifest (non-secret). Credentials go in a git-ignored .env beside this
+# file, or are inherited from the repo-root .env.
+name: {{BUNDLE_NAME}}-gateway
+description: TODO — one line describing this use case.
+
+# Model-facing framing. Be specific about the graph (node labels, relationships)
+# and what the curated tools do — this is what the assistant reads to pick tools.
+instructions: >
+  TODO: describe the graph this bundle analyses and what the usecase_ tools do,
+  so an assistant can choose the right tool from a plain-language question.
+
+# Optional: pin this bundle to a specific Neo4j database on the shared instance.
+# Omit to inherit NEO4J_DATABASE from the root/bundle .env.
+# database: {{BUNDLE_NAME}}
+
+downstream:
+  read_only: false   # set true to hide the downstream write-cypher tool

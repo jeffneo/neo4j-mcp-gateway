@@ -1,0 +1,22 @@
+# Identity & Access Management (IAM) bundle — SKELETON.
+# Select with:  ACTIVE_BUNDLE=iam
+name: neo4j-iam-gateway
+description: Identity & Access Management — entitlements, access risk, and blast radius.
+
+instructions: >
+  This gateway analyses an IDENTITY & ACCESS MANAGEMENT graph. Entities include
+  User, Group, Role, Permission, and Resource, connected by MEMBER_OF (User->Group),
+  GRANTS (Group->Role), HAS_ROLE (User->Role, direct), ALLOWS (Role->Permission),
+  ON (Permission->Resource), and CONFLICTS_WITH (Role<->Role, segregation-of-duty
+  pairs). Generic tools (get-schema, read-cypher, write-cypher) are proxied from the
+  official Neo4j MCP server. Curated tools (prefixed 'usecase_') compute a user's
+  effective access, find segregation-of-duty violations, and trace privilege paths
+  to sensitive resources. Prefer traversals over assumptions about labels.
+
+# To pin IAM to its own database on the shared instance (Neo4j Enterprise
+# multi-db), uncomment. Left off here so the skeleton runs on any single-db
+# instance; bundle.yaml 'database' takes precedence over NEO4J_DATABASE when set.
+# database: iam
+
+downstream:
+  read_only: false

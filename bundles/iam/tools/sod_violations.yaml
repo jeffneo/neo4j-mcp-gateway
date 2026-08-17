@@ -1,0 +1,20 @@
+# SKELETON — implement the cypher: block. Test:
+#   ACTIVE_BUNDLE=iam uv run python scripts/try_tool.py sod_violations
+name: sod_violations
+description: >
+  Find segregation-of-duty violations: users who effectively hold two roles that
+  are marked CONFLICTS_WITH each other (e.g. initiate AND approve payments).
+parameters:
+  - name: limit
+    type: integer
+    description: Maximum number of violations to return
+    required: false
+    default: 25
+# HINT:
+#   - A user's effective roles = direct HAS_ROLE plus MEMBER_OF->GRANTS.
+#   - Match (roleA)-[:CONFLICTS_WITH]-(roleB) where the user effectively holds both.
+#   - Return the user and the conflicting pair; de-duplicate the unordered pair.
+cypher: |
+  // TODO: implement sod_violations. Params bind as $limit. Keep it read-only.
+  RETURN 'TODO: implement sod_violations' AS todo
+read_only: true

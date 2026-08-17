@@ -1,0 +1,26 @@
+# Account-Takeover (ATO) fraud bundle.
+# Selected with:  ACTIVE_BUNDLE=ato  (this is the default bundle)
+name: neo4j-ato-gateway
+description: Account-takeover fraud detection over a retail-banking graph.
+
+# Model-facing framing — this is what the assistant reads to decide which tools
+# to use. Keep it specific to the domain; it materially improves tool selection.
+instructions: >
+  This gateway analyses a retail-banking graph for ACCOUNT-TAKEOVER fraud.
+  Entities include Customer, Session, Device, IP, Location, Account, Transaction,
+  and event nodes (Authentication, ChangeCredential, ChangePhone/Email/Address,
+  AddExternalAccount, Transfer) linked chronologically by NEXT.
+  Generic tools (get-schema, read-cypher, write-cypher) are proxied from the
+  official Neo4j MCP server. Curated tools (prefixed 'usecase_') triage sessions,
+  trace the takeover lifecycle, measure event velocity, surface new-device logins,
+  find money-mule hubs and shared attacker devices, and show contact-change
+  history. Reason from behaviour in the graph — never rely on a field that merely
+  labels something as fraud.
+
+# Optional: this bundle inherits the Neo4j connection from the root .env.
+# To pin it to a specific database on the same instance, uncomment:
+# database: ato
+
+# Downstream official server: allow write-cypher (set true to lock the demo down).
+downstream:
+  read_only: false

@@ -9,9 +9,10 @@ Claude Desktop, and get **two categories of tools behind one stdio endpoint**:
    the supported server as a downstream child and re-exposes its tools unchanged
    (`get-schema`, `read-cypher`, `write-cypher`, `list-gds-procedures`).
 2. **Use-case tools** — parameterized, purpose-built tools defined as **YAML
-   files** in [`tools/`](tools/). Adding one is: drop in a new `*.yaml` and
-   restart. They run their own parameterized Cypher and are namespaced
-   (`usecase_*`) so they never collide with the proxied tools.
+   files**, shipped in swappable **[bundles](#bundles-swappable-use-cases)**
+   (`bundles/<name>/tools/`). Adding one is: drop in a new `*.yaml` and restart.
+   They run their own parameterized Cypher and are namespaced (`usecase_*`) so
+   they never collide with the proxied tools.
 
 The point: keep the official, supported server intact for generic work, while
 making it trivial to add and iterate curated use-case tools.
@@ -27,6 +28,47 @@ making it trivial to add and iterate curated use-case tools.
         │  └───────────────┘            └──────────────────────────────┘                 │
         └─────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Bundles (swappable use cases)
+
+The `gateway/` package is a **domain-agnostic engine**. Everything use-case-specific
+lives in a **bundle** — a self-contained folder under `bundles/`:
+
+```
+bundles/<name>/
+  bundle.yaml     # metadata + non-secret config (name, description, model instructions,
+                  #   optional database, downstream read_only, tool prefix)
+  .env            # optional, git-ignored: this bundle's Neo4j credentials
+  tools/*.yaml    # the use-case tools
+  data/*.cypher   # demo dataset generator(s) + lab docs
+```
+
+Pick the active bundle with `ACTIVE_BUNDLE` (or `--bundle`). The engine points the
+tools, data path, downstream connection, and the server's model-facing
+`instructions` at that bundle. **Config resolution:** root `.env` → bundle `.env`
+(overrides) → `bundle.yaml` (`database` and other declarations).
+
+```bash
+uv run neo4j-mcp-gateway --list-bundles          # ato, iam, …
+ACTIVE_BUNDLE=iam uv run neo4j-mcp-gateway         # serve a specific bundle
+uv run python scripts/new_bundle.py <name>         # scaffold a new bundle
+ACTIVE_BUNDLE=<name> uv run python scripts/validate_bundle.py   # run all its tools
+```
+
+**Swap without editing files** — register one client entry per bundle, each pinned
+via `env`:
+
+```json
+"mcpServers": {
+  "neo4j-ato": { "command": "uv", "args": ["run","--directory","/ABS/PATH","neo4j-mcp-gateway"], "env": {"ACTIVE_BUNDLE":"ato"} },
+  "neo4j-iam": { "command": "uv", "args": ["run","--directory","/ABS/PATH","neo4j-mcp-gateway"], "env": {"ACTIVE_BUNDLE":"iam"} }
+}
+```
+
+Shipped bundles: **`ato`** (account-takeover, complete) and **`iam`** (identity &
+access management, skeleton — 3 stub tools + demo data to build out).
 
 ---
 
@@ -68,8 +110,11 @@ to both the downstream official server and the YAML tool executor.
 | `NEO4J_MCP_CMD` | `uvx neo4j-mcp-server` | How to launch the official downstream server |
 | `NEO4J_READ_ONLY` | *(unset)* | `true` disables downstream `write-cypher` |
 | `NEO4J_TELEMETRY` | `false` | Downstream telemetry opt-in |
-| `TOOLS_DIR` | `tools` | Where YAML use-case tools are discovered |
-| `USECASE_PREFIX` | `usecase_` | Namespace prefix for YAML tool names |
+| `ACTIVE_BUNDLE` | `ato` | Which bundle under `bundles/` to serve |
+| `USECASE_PREFIX` | `usecase_` | Tool-name prefix (also settable in `bundle.yaml`) |
+
+Tools and data come from the active bundle (`bundles/<ACTIVE_BUNDLE>/`); the
+database and model instructions can be declared in its `bundle.yaml`.
 
 ---
 
@@ -106,7 +151,7 @@ Or launch the Inspector UI (drop `--cli`) and browse/click the tools.
 
 ## Adding a use-case tool (the whole point)
 
-1. Create `tools/my_tool.yaml`:
+1. Create `bundles/<active-bundle>/tools/my_tool.yaml` (e.g. `bundles/ato/tools/my_tool.yaml`):
 
    ```yaml
    name: recent_transactions_for_customer
@@ -267,24 +312,24 @@ VS Code flow; only the Claude Desktop config needs their own two paths.
 
 ## Demo data (account-takeover)
 
-`data/ato_demo.cypher` seeds a small, self-contained **ATO** dataset — realistic
-legitimate baseline, two fraud patterns (classic takeover + mule ring), and a
-false-positive traveler for precision discussion. Load it with:
+`bundles/ato/data/ato_demo.cypher` seeds a small, self-contained **ATO** dataset —
+realistic legitimate baseline, two fraud patterns (classic takeover + mule ring),
+and a false-positive traveler for precision discussion. Load it with:
 
 ```bash
-cypher-shell -a "$NEO4J_URI" -u "$NEO4J_USERNAME" -p "$NEO4J_PASSWORD" -d "$NEO4J_DATABASE" -f data/ato_demo.cypher
+cypher-shell -a "$NEO4J_URI" -u "$NEO4J_USERNAME" -p "$NEO4J_PASSWORD" -d "$NEO4J_DATABASE" -f bundles/ato/data/ato_demo.cypher
 ```
 
 It's idempotent and namespaced (`source:'ato-demo'`), so it won't disturb other
-data. See [`data/README.md`](data/README.md) for the roster, the ground-truth
-scoring fields, and copy-paste detection queries.
+data. See [`bundles/ato/data/README.md`](bundles/ato/data/README.md) for the roster,
+the ground-truth scoring fields, and copy-paste detection queries.
 
 **Running the lab:**
-- [`data/README.md`](data/README.md) — the **presenter runbook** (drives the
-  tools explicitly; good with the MCP Inspector).
-- [`data/demo_prompts.md`](data/demo_prompts.md) — **conversational prompts** to
-  paste into Claude Desktop so the model orchestrates the tools itself. This is
-  the intended payoff of the lab.
+- [`bundles/ato/data/README.md`](bundles/ato/data/README.md) — the **presenter
+  runbook** (drives the tools explicitly; good with the MCP Inspector).
+- [`bundles/ato/data/demo_prompts.md`](bundles/ato/data/demo_prompts.md) —
+  **conversational prompts** to paste into Claude Desktop so the model orchestrates
+  the tools itself. This is the intended payoff of the lab.
 
 ---
 
@@ -292,24 +337,28 @@ scoring fields, and copy-paste detection queries.
 
 ```
 neo4j-mcp-gateway/
-  gateway/
-    server.py       # entrypoint: build proxy + load YAML tools + serve stdio
-    proxy.py        # spawn & re-expose the official neo4j/mcp downstream
-    yaml_tools.py   # YAML discovery, validation, MCP registration, Cypher execution
-    config.py       # env-based config (.env)
-  tools/                        # ATO use-case tools (one YAML each)
-    ato_session_triage.yaml     # risk-score every login session
-    ato_lifecycle.yaml          # full access -> change -> payee -> transfer chain
-    event_velocity.yaml         # automated-attack event velocity
-    new_device_logins.yaml      # logins from untrusted devices
-    shared_device_accounts.yaml # one device across many customers (ring)
-    mule_hubs.yaml              # shared high-risk beneficiaries (ring)
-    contact_change_history.yaml # forensic old-vs-new contact changes
-  data/
-    ato_demo.cypher             # account-takeover demo dataset generator
-    README.md                   # load steps + detection queries
+  gateway/            # ENGINE (domain-agnostic; never changes per use case)
+    server.py         # entrypoint: build proxy + load bundle tools + serve stdio
+    proxy.py          # spawn & re-expose the official neo4j/mcp downstream
+    yaml_tools.py     # YAML discovery, validation, MCP registration, Cypher execution
+    bundles.py        # bundle manifest parsing + discovery
+    config.py         # env + active-bundle resolution
+  scripts/
+    try_tool.py       # fast dev loop: run one tool, no MCP/restart
+    new_bundle.py     # scaffold a new bundle from bundles/_template
+    validate_bundle.py# run every tool in a bundle against a live DB
+  bundles/            # SWAPPABLE use cases (pick one with ACTIVE_BUNDLE)
+    _template/        # skeleton copied by new_bundle.py
+    ato/              # account-takeover bundle
+      bundle.yaml     #   metadata + non-secret config
+      tools/*.yaml    #   the 7 ATO tools
+      data/           #   ato_demo.cypher + lab docs
+    iam/              # identity & access management bundle (skeleton)
+      bundle.yaml
+      tools/*.yaml    #   3 stub tools to implement
+      data/iam_demo.cypher
   .vscode/mcp.json
-  .env.example
+  .env.example        # root creds/defaults (per-bundle .env overrides)
   pyproject.toml
   README.md
 ```

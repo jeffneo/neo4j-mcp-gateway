@@ -1,0 +1,18 @@
+# Your first tool. This one works on ANY graph (it counts node labels), so a
+# freshly-scaffolded bundle runs immediately:
+#   ACTIVE_BUNDLE={{BUNDLE_NAME}} uv run python scripts/try_tool.py example_tool
+# Replace it with something domain-specific.
+name: example_tool
+description: Count nodes by label — a sanity check that the bundle is wired up.
+parameters:
+  - name: limit
+    type: integer
+    description: Max label groups to return
+    required: false
+    default: 25
+cypher: |
+  MATCH (n)
+  RETURN labels(n) AS labels, count(*) AS count
+  ORDER BY count DESC
+  LIMIT $limit
+read_only: true
