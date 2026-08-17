@@ -44,7 +44,8 @@ security:
   protected_labels: [Communication, Request, Trade, Deal]
 
 downstream:
-  read_only: true          # hide the downstream write-cypher tool
-  hide: [read-cypher]      # hide raw read-cypher — secure-read-cypher replaces it
-  # NOTE: get-schema stays exposed — text2cypher needs it to author fragments.
-  # It discloses structure (labels, relationship types, property keys), not rows.
+  read_only: true   # official server never registers write-cypher
+  # NOTE: raw read-cypher is hidden AUTOMATICALLY because security.mode is
+  # mediated — it would bypass the filter. Set security.allow_unmediated_read to
+  # override (logged loudly). get-schema stays exposed: text2cypher needs it, and
+  # it discloses structure (labels, relationship types, property keys), not rows.

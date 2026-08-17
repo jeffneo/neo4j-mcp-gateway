@@ -30,19 +30,63 @@ from .config import Config
 from .yaml_tools import Neo4jExecutor
 
 
-@dataclass
 class ToolContext:
-    """What a pytool module's ``build_tools`` receives."""
+    """What a pytool module's ``build_tools`` receives.
 
-    config: Config
-    executor: Neo4jExecutor
+    Use :meth:`secure_run` in a mediated bundle: the engine cannot auto-wrap
+    arbitrary Python, so a code tool that reads business records must opt into
+    mediation deliberately. Reaching for :attr:`executor` directly is allowed
+    (reference data, admin metadata) but is *recorded*, and the server logs a
+    warning naming any bundle whose code tools bypassed mediation — an unmediated
+    path should be visible rather than assumed safe.
+    """
+
+    def __init__(self, config: Config, executor: Neo4jExecutor):
+        self.config = config
+        self._executor = executor
+        self.used_raw_executor = False
+
+    @property
+    def executor(self) -> Neo4jExecutor:
+        """The raw executor — no entitlement filtering. Use knowingly."""
+        self.used_raw_executor = True
+        return self._executor
+
+    def secure_run(
+        self,
+        match_clause: str,
+        scope: list[str],
+        final_return: str = "",
+        params: dict | None = None,
+        protect: list[str] | None = None,
+        principal: str | None = None,
+    ) -> list[dict]:
+        """Run a match clause through the entitlement wrapper.
+
+        ``scope`` names the variables ``match_clause`` produces; every one is
+        filtered against the caller. ``final_return`` runs after filtering.
+        """
+        from . import mediation
+
+        policy = self.config.security
+        if not policy.mediated:
+            raise RuntimeError("secure_run() requires security.mode: mediated")
+        resolved, _ = mediation.resolve_principal(policy, principal)
+        final = mediation.validate_final_return(final_return, scope)
+        query = mediation.compose(policy, match_clause, scope, final, protect)
+        merged = {**(params or {}), **mediation.security_params(policy, resolved)}
+        return self._executor.run(query, merged, read_only=True)
 
 
-def load_pytools(config: Config, executor: Neo4jExecutor) -> list[Tool]:
-    """Import every ``*.py`` in the bundle's ``pytools/`` and collect their tools."""
+def load_pytools(config: Config, executor: Neo4jExecutor) -> tuple[list[Tool], bool]:
+    """Import every ``*.py`` in the bundle's ``pytools/`` and collect their tools.
+
+    Returns ``(tools, used_raw_executor)`` — the flag lets the server warn when a
+    mediated bundle's code tools took an unfiltered path.
+    """
     directory = config.pytools_dir
     if not directory or not directory.exists():
-        return []
+        return [], False
 
     ctx = ToolContext(config=config, executor=executor)
     tools: list[Tool] = []
@@ -61,4 +105,4 @@ def load_pytools(config: Config, executor: Neo4jExecutor) -> list[Tool]:
         result = builder(ctx)
         if result:
             tools.extend(result)
-    return tools
+    return tools, ctx.used_raw_executor

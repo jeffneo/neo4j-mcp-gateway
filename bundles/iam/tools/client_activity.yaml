@@ -1,0 +1,43 @@
+# A CURATED mediated tool over real business records — the production-shaped path.
+#
+# The Cypher is authored by a human, so the inference-oracle risk of an
+# open-ended model-generated fragment doesn't apply. The engine inserts the
+# authorization prelude and entitlement filter between `match` and `return`, so
+# the SAME tool returns different rows (and different totals) per caller.
+#
+# `scope` lists what `match` produces; every one of those variables is filtered.
+# `protect` is the strict subset: t must carry an access-control list or the row
+# is dropped — a Trade that somehow lost its ACL will not leak through this tool.
+name: client_activity
+description: >
+  Trades booked for a client, with notional and booking desk. Results are limited
+  to the trades the caller is entitled to see, and the totals reflect only those.
+parameters:
+  - name: client
+    type: string
+    description: Client name, e.g. "Acme Corp"
+    required: true
+  - name: min_notional
+    type: number
+    description: Only include trades at or above this notional
+    required: false
+    default: 0
+match: |
+  MATCH (t:Trade)-[:FOR_CLIENT]->(c:Client {name: $client})
+  WHERE t.notional >= $min_notional
+  OPTIONAL MATCH (t)-[:BOOKED_ON]->(d:Desk)
+scope: [t, c, d]
+protect: [t]
+return: |
+  RETURN t.tradeId  AS tradeId,
+         t.product  AS product,
+         t.notional AS notional,
+         t.currency AS currency,
+         d.name     AS desk
+  ORDER BY notional DESC
+read_only: true
+
+# Used only by scripts/validate_bundle.py so this tool is exercised (and
+# persona-diffed) in CI despite having a required parameter.
+sample_args:
+  client: "Acme Corp"

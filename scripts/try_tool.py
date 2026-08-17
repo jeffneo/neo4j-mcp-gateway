@@ -30,7 +30,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gateway.config import Config
-from gateway.yaml_tools import Neo4jExecutor, ParamSpec, ToolSpec, load_tool_specs
+from gateway.yaml_tools import (Neo4jExecutor, ParamSpec, ToolSpec, load_tool_specs,
+                                resolve_tool_query)
 
 
 def _coerce(raw: str, ptype: str):
@@ -88,10 +89,15 @@ def main(argv: list[str]) -> int:
     # Parse key=value args and coerce to declared types.
     pmap: dict[str, ParamSpec] = {p.name: p for p in spec.parameters}
     params: dict[str, object] = {p.name: p.default for p in spec.parameters if p.has_default}
+    principal: str | None = None
     for arg in argv[1:]:
         key, sep, value = arg.partition("=")
         if not sep:
             print(f"ignoring malformed arg {arg!r} (expected key=value)", file=sys.stderr)
+            continue
+        if key == "principal":
+            # In a mediated bundle, run the tool as this caller (needs impersonation).
+            principal = value
             continue
         if key not in pmap:
             print(f"warning: {key!r} is not a parameter of {spec.name!r}", file=sys.stderr)
@@ -106,18 +112,21 @@ def main(argv: list[str]) -> int:
 
     executor = Neo4jExecutor(config)
     try:
-        rows = executor.run(spec.cypher, params, spec.read_only)
+        query, extra = resolve_tool_query(config, spec, principal)
+        params.update(extra)
+        rows = executor.run(query, params, spec.read_only)
     except Exception as exc:  # Neo4j / Cypher errors — show them plainly
         print(f"query failed: {exc}", file=sys.stderr)
         return 1
     finally:
         executor.close()
 
-    print(json.dumps(
-        {"tool": spec.name, "read_only": spec.read_only, "params": params,
-         "count": len(rows), "records": rows},
-        indent=2, default=str,
-    ))
+    payload = {"tool": spec.name, "read_only": spec.read_only,
+               "params": {k: v for k, v in params.items() if not k.startswith("__secure_")},
+               "count": len(rows), "records": rows}
+    if config.security.mediated:
+        payload["security"] = {"mode": "mediated", "principal": principal or "(from environment)"}
+    print(json.dumps(payload, indent=2, default=str))
     return 0
 
 

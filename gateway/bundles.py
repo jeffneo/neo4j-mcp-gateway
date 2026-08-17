@@ -28,6 +28,38 @@ VALID_MODES = (MODE_OPEN, MODE_MEDIATED)
 
 
 @dataclass
+class IdentityConfig:
+    """How to turn a principal string into the set of principals it holds.
+
+    Every field is a graph-shape detail, so a bundle whose identity model uses
+    different labels/relationships/properties can be mediated without code.
+    """
+
+    labels: list[str] = field(default_factory=lambda: ["User", "Principal"])
+    match_keys: list[str] = field(
+        default_factory=lambda: ["username", "email", "mail", "userPrincipalName", "upn", "name", "id"]
+    )
+    group_rels: list[str] = field(
+        default_factory=lambda: ["MEMBER_OF", "MEMBER_OF_GROUP", "IN_GROUP", "HAS_GROUP"]
+    )
+    group_name_keys: list[str] = field(
+        default_factory=lambda: ["name", "group", "displayName", "email", "mail", "id"]
+    )
+    inline_group_list: str = "AdGroupList"
+
+
+@dataclass
+class PrincipalConfig:
+    """Where the caller's identity comes from, and whether it may be overridden."""
+
+    env: list[str] = field(
+        default_factory=lambda: ["NEO4J_MCP_PRINCIPAL", "NEO4J_MCP_AUTH_SUBJECT", "USER_EMAIL"]
+    )
+    everyone: str = "everyone"
+    allow_impersonation: bool = False
+
+
+@dataclass
 class SecurityPolicy:
     """How a bundle exposes its data. Declared under ``security:`` in bundle.yaml.
 
@@ -46,6 +78,14 @@ class SecurityPolicy:
     # scripts/validate_bundle.py as a fail-closed data-quality guard: a record
     # that should be permissioned but isn't would otherwise flow as reference data.
     protected_labels: list[str] = field(default_factory=list)
+    identity: IdentityConfig = field(default_factory=IdentityConfig)
+    principal: PrincipalConfig = field(default_factory=PrincipalConfig)
+    # Register the open-ended text2cypher tool (secure-read-cypher). Turn off to
+    # expose ONLY curated mediated tools — the tightest posture.
+    expose_open_query_tool: bool = True
+    # Keep the proxied raw read-cypher despite mediation. Defeats the guarantee;
+    # requires an explicit opt-in and is logged loudly.
+    allow_unmediated_read: bool = False
 
     @property
     def mediated(self) -> bool:
@@ -96,10 +136,42 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
     protected_labels = sec_raw.get("protected_labels") or []
     if not isinstance(protected_labels, list):
         raise ValueError(f"{f}: security.protected_labels must be a list of labels")
+
+    id_raw = sec_raw.get("identity") or {}
+    if not isinstance(id_raw, dict):
+        raise ValueError(f"{f}: security.identity must be a mapping")
+    defaults = IdentityConfig()
+    identity = IdentityConfig(
+        labels=[str(x) for x in (id_raw.get("labels") or defaults.labels)],
+        match_keys=[str(x) for x in (id_raw.get("match_keys") or defaults.match_keys)],
+        group_rels=[str(x) for x in (id_raw.get("group_rels") or defaults.group_rels)],
+        group_name_keys=[str(x) for x in (id_raw.get("group_name_keys") or defaults.group_name_keys)],
+        inline_group_list=str(id_raw.get("inline_group_list") or defaults.inline_group_list),
+    )
+    # Relationship types are interpolated into the Cypher pattern (they cannot be
+    # parameterised), so they must be safe identifiers.
+    for rel in identity.group_rels:
+        if not rel.replace("_", "").isalnum():
+            raise ValueError(f"{f}: security.identity.group_rels contains invalid type {rel!r}")
+
+    p_raw = sec_raw.get("principal") or {}
+    if not isinstance(p_raw, dict):
+        raise ValueError(f"{f}: security.principal must be a mapping")
+    p_defaults = PrincipalConfig()
+    principal = PrincipalConfig(
+        env=[str(x) for x in (p_raw.get("env") or p_defaults.env)],
+        everyone=str(p_raw.get("everyone") or p_defaults.everyone),
+        allow_impersonation=bool(p_raw.get("allow_impersonation", False)),
+    )
+
     security = SecurityPolicy(
         mode=mode,
         permissions_property=str(sec_raw.get("permissions_property") or "Permissions.Read"),
         protected_labels=[str(x) for x in protected_labels],
+        identity=identity,
+        principal=principal,
+        expose_open_query_tool=bool(sec_raw.get("expose_open_query_tool", True)),
+        allow_unmediated_read=bool(sec_raw.get("allow_unmediated_read", False)),
     )
 
     downstream = raw.get("downstream") or {}

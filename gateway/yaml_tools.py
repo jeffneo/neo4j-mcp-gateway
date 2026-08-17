@@ -25,7 +25,7 @@ later sit in front of :func:`load_tool_specs` without touching execution.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -71,14 +71,35 @@ class ParamSpec:
 
 @dataclass
 class ToolSpec:
-    """A validated, in-memory representation of one YAML tool file."""
+    """A validated, in-memory representation of one YAML tool file.
+
+    Two authoring forms:
+
+    * **direct** — a single ``cypher:`` block. Used by ``open`` bundles.
+    * **mediated** — ``match:`` + ``scope:`` + ``return:``. Required by
+      ``mediated`` bundles so the engine can insert the authorization prelude and
+      entitlement filter *between* the match and the return. We never parse Cypher
+      to find the RETURN: getting that wrong would be a security bug, so the split
+      is declared by the author instead.
+    """
 
     name: str
     description: str
     parameters: list[ParamSpec]
-    cypher: str
+    cypher: str                      # direct form (empty when mediated)
     read_only: bool
     source_path: Path
+    match_clause: str = ""           # mediated form
+    return_clause: str = ""
+    scope: list[str] = field(default_factory=list)
+    protect: list[str] = field(default_factory=list)
+    # Optional arguments used only by scripts/validate_bundle.py, so a tool with
+    # required parameters can still be exercised (and persona-diffed) in CI.
+    sample_args: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_mediated_form(self) -> bool:
+        return bool(self.match_clause)
 
     def input_schema(self) -> dict[str, Any]:
         """Build the MCP ``inputSchema`` (JSON Schema) from the parameter list."""
@@ -134,8 +155,46 @@ def parse_tool_spec(path: Path) -> ToolSpec:
         "'description' is required and must be a non-empty string",
     )
 
+    # Either the direct form (cypher:) or the mediated form (match: + return:).
     cypher = raw.get("cypher")
-    _require(isinstance(cypher, str) and cypher.strip() != "", path, "'cypher' is required and must be a non-empty string")
+    match_clause = raw.get("match")
+    return_clause = raw.get("return")
+    has_direct = isinstance(cypher, str) and cypher.strip() != ""
+    has_mediated = isinstance(match_clause, str) and match_clause.strip() != ""
+
+    _require(
+        has_direct or has_mediated,
+        path,
+        "a tool needs either 'cypher' (direct) or 'match' + 'return' (mediated form)",
+    )
+    _require(
+        not (has_direct and has_mediated),
+        path,
+        "use either 'cypher' or 'match'/'return', not both",
+    )
+
+    scope: list[str] = []
+    protect: list[str] = []
+    if has_mediated:
+        _require(
+            isinstance(return_clause, str) and return_clause.strip() != "",
+            path,
+            "the mediated form requires a 'return' clause (it runs AFTER entitlement filtering)",
+        )
+        raw_scope = raw.get("scope") or []
+        _require(isinstance(raw_scope, list) and raw_scope, path,
+                 "the mediated form requires 'scope': the variables carried from 'match' into 'return'")
+        raw_protect = raw.get("protect") or []
+        _require(isinstance(raw_protect, list), path, "'protect' must be a list if present")
+        scope = [str(v) for v in raw_scope]
+        protect = [str(v) for v in raw_protect]
+        for v in scope + protect:
+            _require(v.isidentifier(), path, f"variable {v!r} is not a valid Cypher identifier")
+        unknown = [v for v in protect if v not in scope]
+        _require(not unknown, path, f"'protect' lists variables missing from 'scope': {unknown}")
+
+    sample_args = raw.get("sample_args") or {}
+    _require(isinstance(sample_args, dict), path, "'sample_args' must be a mapping if present")
 
     read_only = raw.get("read_only", True)
     _require(isinstance(read_only, bool), path, "'read_only' must be a boolean if present")
@@ -179,9 +238,14 @@ def parse_tool_spec(path: Path) -> ToolSpec:
         name=name,
         description=description.strip(),
         parameters=params,
-        cypher=cypher,
+        cypher=cypher if has_direct else "",
         read_only=bool(read_only),
         source_path=path,
+        match_clause=match_clause if has_mediated else "",
+        return_clause=return_clause if has_mediated else "",
+        scope=scope,
+        protect=protect,
+        sample_args=dict(sample_args),
     )
 
 
@@ -301,16 +365,46 @@ class Neo4jExecutor:
 # MCP registration
 # --------------------------------------------------------------------------- #
 
-def _make_handler(spec: ToolSpec, executor: Neo4jExecutor):
-    """Build the async tool handler that binds arguments to the Cypher params."""
+def resolve_tool_query(
+    config: Config | None, spec: ToolSpec, principal: str | None = None
+) -> tuple[str, dict[str, Any]]:
+    """Return ``(query, extra_params)`` for a tool spec.
 
+    Direct-form tools run their ``cypher`` as-is. In a mediated bundle, a
+    mediated-form tool is composed with the authorization prelude and entitlement
+    filter, and the caller's principal is resolved. Shared by the MCP handler and
+    the dev/validation scripts so all three take the same path.
+    """
+    policy = config.security if config else None
+    if not (policy and policy.mediated and spec.is_mediated_form):
+        return spec.cypher, {}
+
+    from . import mediation
+
+    resolved, _ = mediation.resolve_principal(policy, principal)
+    query = mediation.compose(
+        policy, spec.match_clause, spec.scope, spec.return_clause.strip(), spec.protect
+    )
+    return query, mediation.security_params(policy, resolved)
+
+
+def _make_handler(spec: ToolSpec, executor: Neo4jExecutor, config: Config | None = None):
+    """Build the async tool handler that binds arguments to the Cypher params.
+
+    In a mediated bundle the tool's ``match``/``return`` clauses are composed with
+    the authorization prelude and entitlement filter, and the caller's principal is
+    resolved per call — so the same curated tool returns different rows per user.
+    """
     async def handler(**kwargs: Any) -> dict[str, Any]:
         # Start from declared defaults, then overlay caller-supplied arguments.
         params: dict[str, Any] = {p.name: p.default for p in spec.parameters if p.has_default}
-        params.update({k: v for k, v in kwargs.items() if v is not None})
+        params.update({k: v for k, v in kwargs.items() if v is not None and k != "principal"})
+
+        query, extra = resolve_tool_query(config, spec, kwargs.get("principal"))
+        params.update(extra)
 
         try:
-            rows = executor.run(spec.cypher, params, spec.read_only)
+            rows = executor.run(query, params, spec.read_only)
         except neo4j.exceptions.Neo4jError as exc:
             # Cypher / server-side errors -> clean tool error (code + message).
             raise ToolError(f"Neo4j error [{exc.code}]: {exc.message}") from exc
@@ -326,18 +420,56 @@ def _make_handler(spec: ToolSpec, executor: Neo4jExecutor):
     return handler
 
 
-def build_yaml_tool(spec: ToolSpec, executor: Neo4jExecutor, prefix: str) -> FunctionTool:
+def _check_mediated_spec(spec: ToolSpec) -> None:
+    """A mediated bundle's tools must be filterable. Fail loudly at load, not later."""
+    if not spec.is_mediated_form:
+        raise ToolSpecError(
+            f"{spec.source_path.name}: this bundle declares security.mode=mediated, so tools must "
+            "use the mediated form so the entitlement filter can be inserted between the match and "
+            "the return. Replace 'cypher:' with:\n"
+            "    match: |\n      MATCH ...        # no RETURN\n"
+            "    scope: [x]         # variables carried into the return\n"
+            "    return: |\n      RETURN ...       # runs AFTER filtering"
+        )
+    if not spec.read_only:
+        raise ToolSpecError(
+            f"{spec.source_path.name}: mediated bundles are read-only "
+            "(entitlement mediation covers reads; a write tool would be unfiltered)."
+        )
+
+
+def build_yaml_tool(
+    spec: ToolSpec, executor: Neo4jExecutor, prefix: str, config: Config | None = None
+) -> FunctionTool:
     """Turn a :class:`ToolSpec` into a registered-ready :class:`FunctionTool`."""
-    mode = "read" if spec.read_only else "write"
-    description = (
-        f"{spec.description}\n\n"
-        f"(Use-case tool from {spec.source_path.name}; runs curated Cypher in {mode} mode.)"
-    )
+    policy = config.security if config else None
+    mediated = bool(policy and policy.mediated)
+
+    if mediated:
+        note = ("Results are filtered to the caller's entitlements; aggregates are computed after "
+                "filtering, so they reflect only rows the caller may see.")
+    else:
+        mode = "read" if spec.read_only else "write"
+        note = f"Runs curated Cypher in {mode} mode."
+    description = f"{spec.description}\n\n({spec.source_path.name} — {note})"
+
+    schema = spec.input_schema()
+    # Under mediation with impersonation enabled, every curated tool can also be
+    # run as another principal — that is what makes a persona-diff demo possible.
+    if mediated and config is not None:
+        from . import mediation
+
+        if mediation.impersonation_allowed(policy):
+            schema["properties"]["principal"] = {
+                "type": "string",
+                "description": "Run as this principal (test impersonation; enabled for this deployment).",
+            }
+
     return FunctionTool(
         name=f"{prefix}{spec.name}",
         description=description,
-        parameters=spec.input_schema(),
-        fn=_make_handler(spec, executor),
+        parameters=schema,
+        fn=_make_handler(spec, executor, config),
     )
 
 
@@ -350,7 +482,9 @@ def register_yaml_tools(mcp: FastMCP, config: Config, executor: Neo4jExecutor) -
     specs = load_tool_specs(config.tools_dir)
     registered: list[str] = []
     for spec in specs:
-        tool = build_yaml_tool(spec, executor, config.usecase_prefix)
+        if config.security.mediated:
+            _check_mediated_spec(spec)
+        tool = build_yaml_tool(spec, executor, config.usecase_prefix, config)
         mcp.add_tool(tool)
         registered.append(tool.name)
     return registered

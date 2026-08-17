@@ -26,6 +26,7 @@ from .config import BUNDLES_DIR, Config
 from .middleware import HideToolsMiddleware
 from .proxy import build_downstream_proxy
 from .pytools import load_pytools
+from .security_tools import build_security_tools
 from .yaml_tools import Neo4jExecutor, ToolSpecError, register_yaml_tools
 
 
@@ -39,10 +40,19 @@ def build_gateway(config: Config | None = None) -> FastMCP:
     config = config or Config.from_env()
 
     _log(f"active bundle: {config.active_bundle}  ({config.bundle.description or 'no description'})")
+    _log(f"security mode: {config.security.mode}")
 
-    # Hide any proxied downstream tools the bundle marks off-limits (e.g. the IAM
-    # bundle hides raw 'read-cypher', which would bypass secure-read-cypher).
-    middleware = [HideToolsMiddleware(config.hide_tools)] if config.hide_tools else []
+    # Under mediation, the proxied raw read tool would bypass the entitlement
+    # filter entirely, so it is hidden by default rather than by convention.
+    hidden = list(config.hide_tools)
+    if config.security.mediated and not config.security.allow_unmediated_read:
+        if "read-cypher" not in hidden:
+            hidden.append("read-cypher")
+    elif config.security.mediated:
+        _log("WARNING: security.allow_unmediated_read=true — raw read-cypher is exposed "
+             "and bypasses entitlement filtering")
+
+    middleware = [HideToolsMiddleware(hidden)] if hidden else []
     gateway = FastMCP(name=config.server_name, instructions=config.instructions, middleware=middleware)
 
     # 1) Proxy the official downstream server and mount its tools unchanged.
@@ -50,8 +60,8 @@ def build_gateway(config: Config | None = None) -> FastMCP:
     proxy = build_downstream_proxy(config)
     gateway.mount(proxy)
     _log("mounted official Neo4j MCP tools (get-schema, read-cypher, write-cypher, list-gds-procedures)")
-    if config.hide_tools:
-        _log(f"hiding proxied tool(s): {', '.join(config.hide_tools)}")
+    if hidden:
+        _log(f"hiding proxied tool(s): {', '.join(hidden)}")
 
     executor = Neo4jExecutor(config)
     atexit.register(executor.close)
@@ -68,12 +78,24 @@ def build_gateway(config: Config | None = None) -> FastMCP:
         _log(f"no YAML tools in {config.tools_dir}")
 
     # 3) Register code-backed (Python) tools, if the bundle ships any.
-    pytools = load_pytools(config, executor)
+    pytools, used_raw = load_pytools(config, executor)
     for tool in pytools:
         gateway.add_tool(tool)
     if pytools:
         _log(f"registered {len(pytools)} code tool(s) from {config.pytools_dir}: "
              f"{', '.join(t.name for t in pytools)}")
+    if used_raw and config.security.mediated:
+        _log("WARNING: a code tool in this bundle used the raw executor — that path is NOT "
+             "entitlement-filtered. Use ToolContext.secure_run() for business records.")
+
+    # 4) Engine security tools for a mediated bundle (resolve-identity, and the
+    #    open-ended secure-read-cypher unless the bundle publishes curated only).
+    security_tools = build_security_tools(config, executor)
+    for tool in security_tools:
+        gateway.add_tool(tool)
+    if security_tools:
+        _log(f"registered {len(security_tools)} security tool(s): "
+             f"{', '.join(t.name for t in security_tools)}")
 
     return gateway
 

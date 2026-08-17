@@ -1,6 +1,8 @@
 # Spec: entitlement mediation as an engine capability
 
-Status: **proposed** (not implemented). Covers two changes:
+Status: **implemented**. Item 1 in commit `fca100a`, item 2 following it.
+Deviations from the original proposal are noted inline as **[as built]**.
+Covers two changes:
 
 1. **Derived protection** — remove "the model chooses its own security parameter."
 2. **`security:` config block + mediated YAML tools** — make entitlement filtering a
@@ -165,11 +167,22 @@ parameters:
     required: true
 match: |                          # no RETURN; may use MATCH/OPTIONAL MATCH/WHERE/WITH
   MATCH (t:Trade)-[:FOR_CLIENT]->(c:Client {name: $client})
+scope: [t, c]                     # [as built] REQUIRED: variables carried match -> return
 protect: [t]                      # optional, advisory (see §1)
 return: |                         # runs AFTER filtering — aggregates belong here
   RETURN t.tradeId AS tradeId, t.notional AS notional
 read_only: true                   # required true in mediated mode
+sample_args:                      # [as built] optional; lets CI exercise a tool
+  client: "Acme Corp"             #   that has required parameters
 ```
+
+**[as built] `scope:` is required.** The engine must know which variables to carry
+out of the match subquery and into the filter, and deriving that would mean
+parsing Cypher. Declaring it is one line and keeps the composition exact.
+
+**[as built] `sample_args:`** — validation-only arguments so a tool with required
+parameters is still exercised and persona-diffed by `validate_bundle.py`. Without
+it, the most interesting tools are the ones CI skips.
 
 Compatibility rules:
 

@@ -42,8 +42,8 @@ bundles/<name>/
                   #   REQUIRED security.mode, downstream.*, tool prefix) — NO secrets
   .env            # optional, git-ignored: this bundle's Neo4j connection override
   tools/*.yaml    # static parameterized use-case tools
-  pytools/*.py    # code-backed tools (build_tools(ctx) -> [Tool]) for logic that
-                  #   isn't static Cypher (e.g. IAM secure-read-cypher)
+  pytools/*.py    # optional code-backed tools (build_tools(ctx) -> [Tool]) for
+                  #   logic that isn't static Cypher
   data/*.cypher   # demo dataset generator(s) + lab docs
 ```
 
@@ -84,11 +84,34 @@ security:
   # mode: mediated  # every read is entitlement-filtered against the caller
 ```
 
-Under `mediated`, reads are wrapped in an authorization prelude and every variable
-the query produces is filtered against the caller's principals. Declare
-`protected_labels` so [`scripts/validate_bundle.py`](scripts/validate_bundle.py)
+Under `mediated`, the engine:
+
+1. registers **`resolve-identity`** and (optionally) **`secure-read-cypher`** —
+   entitlement mediation is an engine capability, so no bundle ships security code;
+2. wraps **every curated YAML tool** in the authorization prelude + entitlement
+   filter, so the same tool returns different rows per caller;
+3. **auto-hides raw `read-cypher`**, which would bypass the filter, and defaults
+   the downstream to read-only;
+4. requires tools to use the mediated authoring form (below) and to be read-only.
+
+Mediated tools declare the split explicitly rather than having the engine parse
+Cypher to find the `RETURN` — getting that wrong would be a security bug:
+
+```yaml
+match: |                # no RETURN
+  MATCH (t:Trade)-[:FOR_CLIENT]->(c:Client {name: $client})
+scope: [t, c]           # variables carried into the return; ALL are filtered
+protect: [t]            # optional: strict — must carry an ACL or the row is dropped
+return: |               # runs AFTER filtering, so aggregates are per-entitlement
+  RETURN t.tradeId AS tradeId, t.notional AS notional
+```
+
+Declare `protected_labels` so [`scripts/validate_bundle.py`](scripts/validate_bundle.py)
 fails when a business record is missing its access-control list — otherwise such a
-record silently flows to everyone.
+record silently flows to everyone. The validator also persona-diffs mediated tools
+to prove the filter actually discriminates between callers.
+
+Design rationale and known limits: [`docs/mediation-spec.md`](docs/mediation-spec.md).
 
 > **Note:** `get-schema` stays exposed even under `mediated`, because
 > text-to-Cypher needs it. It reveals structure (labels, relationship types,
@@ -96,9 +119,9 @@ record silently flows to everyone.
 > treats the schema itself as sensitive.
 
 Shipped bundles: **`ato`** (account-takeover; 7 YAML tools; `mode: open`) and
-**`iam`** (investment-bank entitlements; `mode: mediated`, code-backed
-`resolve-identity` + `secure-read-cypher`, raw `read-cypher` hidden so it cannot
-bypass the filter).
+**`iam`** (investment-bank entitlements; `mode: mediated`, curated tools filtered
+per caller, raw `read-cypher` auto-hidden). Note the IAM bundle contains **no
+security code** — it declares a policy and the engine does the rest.
 
 ---
 
@@ -371,6 +394,8 @@ neo4j-mcp-gateway/
     server.py         # entrypoint: build proxy + load bundle tools + serve stdio
     proxy.py          # spawn & re-expose the official neo4j/mcp downstream
     yaml_tools.py     # YAML discovery, validation, MCP registration, Cypher execution
+    mediation.py      # entitlement mediation: prelude + filter composition
+    security_tools.py # resolve-identity / secure-read-cypher for mediated bundles
     pytools.py        # load code-backed bundle tools (build_tools(ctx))
     middleware.py     # HideToolsMiddleware (hide proxied tools, e.g. read-cypher)
     bundles.py        # bundle manifest parsing + discovery
@@ -385,9 +410,9 @@ neo4j-mcp-gateway/
       bundle.yaml     #   metadata + non-secret config
       tools/*.yaml    #   the 7 ATO tools
       data/           #   ato_demo.cypher + lab docs
-    iam/              # identity & access management bundle
-      bundle.yaml     #   read_only + hide: [read-cypher]
-      pytools/        #   resolve-identity + secure-read-cypher (code-backed)
+    iam/              # investment-bank entitlements bundle
+      bundle.yaml     #   security.mode: mediated + protected_labels
+      tools/*.yaml    #   curated mediated tools (match/scope/return)
       data/iam_demo.cypher
       data/iam_demo.cypher
   .vscode/mcp.json

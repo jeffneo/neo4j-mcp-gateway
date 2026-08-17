@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gateway.config import Config
-from gateway.yaml_tools import Neo4jExecutor, load_tool_specs
+from gateway.yaml_tools import Neo4jExecutor, load_tool_specs, resolve_tool_query
 
 
 # Fail-closed data-quality guard. In a mediated bundle, a business record that is
@@ -67,6 +67,75 @@ def _check_protected_labels(config, executor) -> int:
     return failures
 
 
+def _personas_from_graph(config, executor, limit: int = 6) -> list[str]:
+    """Pick a few real principals out of the identity graph to diff against."""
+    policy = config.security
+    query = (
+        "MATCH (u) WHERE any(l IN labels(u) WHERE l IN $labels) "
+        "RETURN head([k IN $keys WHERE u[k] IS NOT NULL | u[k]]) AS p LIMIT $limit"
+    )
+    rows = executor.run(
+        query,
+        {"labels": policy.identity.labels, "keys": policy.identity.match_keys, "limit": limit},
+        read_only=True,
+    )
+    return [r["p"] for r in rows if r.get("p")]
+
+
+def _check_entitlement_differentiation(config, executor, specs) -> int:
+    """Assert mediated tools actually discriminate between callers.
+
+    A filter that silently returns the same rows for everyone is indistinguishable
+    from no filter at all — this catches a mediation path that has been wired up
+    but isn't doing anything.
+    """
+    policy = config.security
+    if not policy.mediated:
+        return 0
+
+    from gateway import mediation
+
+    if not mediation.impersonation_allowed(policy):
+        print("  SKIP  persona diff (needs NEO4J_MCP_ALLOW_IMPERSONATION=true "
+              "or security.principal.allow_impersonation)")
+        return 0
+
+    personas = _personas_from_graph(config, executor)
+    if len(personas) < 2:
+        print("  SKIP  persona diff (fewer than 2 identities in the graph)")
+        return 0
+
+    def _args_for(spec):
+        args = {p.name: p.default for p in spec.parameters if p.has_default}
+        args.update(spec.sample_args)
+        return args
+
+    runnable = [s for s in specs if s.is_mediated_form
+                and not [p.name for p in s.parameters
+                         if p.required and not p.has_default and p.name not in s.sample_args]]
+    if not runnable:
+        print("  note  persona diff: no zero-argument mediated tools to compare")
+        return 0
+
+    print(f"  entitlement differentiation ({len(personas)} personas):")
+    for spec in runnable:
+        results = {}
+        for who in personas:
+            params = _args_for(spec)
+            params.update(mediation.security_params(policy, who))
+            query = mediation.compose(policy, spec.match_clause, spec.scope,
+                                      spec.return_clause.strip(), spec.protect)
+            results[who] = len(executor.run(query, params, read_only=True))
+        distinct = set(results.values())
+        detail = ", ".join(f"{w.split('@')[0]}={n}" for w, n in results.items())
+        if len(distinct) > 1:
+            print(f"    OK    {spec.name:24} varies by caller ({detail})")
+        else:
+            print(f"    note  {spec.name:24} identical for all callers ({detail}) — "
+                  "expected only if this tool reads reference data")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     bundle = argv[0] if argv and not argv[0].startswith("-") else None
     config = Config.from_env(active_bundle=bundle)
@@ -83,18 +152,23 @@ def main(argv: list[str]) -> int:
     failures = 0
     try:
         failures += _check_protected_labels(config, executor)
+        failures += _check_entitlement_differentiation(config, executor, specs)
 
         if not specs:
             print(f"no YAML tools in {config.tools_dir}")
 
         for spec in sorted(specs, key=lambda s: s.name):
-            missing = [p.name for p in spec.parameters if p.required and not p.has_default]
+            missing = [p.name for p in spec.parameters
+                       if p.required and not p.has_default and p.name not in spec.sample_args]
             if missing:
                 print(f"  SKIP  {spec.name:28} (needs args: {', '.join(missing)})")
                 continue
             params = {p.name: p.default for p in spec.parameters if p.has_default}
+            params.update(spec.sample_args)
             try:
-                rows = executor.run(spec.cypher, params, spec.read_only)
+                query, extra = resolve_tool_query(config, spec)
+                params.update(extra)
+                rows = executor.run(query, params, spec.read_only)
                 print(f"  OK    {spec.name:28} {len(rows)} row(s)")
             except Exception as exc:
                 failures += 1

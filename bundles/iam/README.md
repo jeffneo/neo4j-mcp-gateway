@@ -28,21 +28,29 @@ coverage teams (`coverage-acme`), desks (`desk-rates-emea`), `ops-settlements`,
 
 ## Tools
 
-**Code-backed** (`pytools/iam_tools.py`) — logic that can't be static Cypher:
+This bundle owns **no security code**. It sets `security.mode: mediated` in
+`bundle.yaml`, and the engine supplies the mechanism — any bundle can do the same.
+
+**Engine-provided** (registered automatically when mediated):
 
 - **`resolve-identity`** — resolve the caller and expand their entitlement groups
   into `authzPrincipals`. Call this first.
-- **`secure-read-cypher`** — run a read-only MATCH fragment (no `RETURN`) inside
-  the authorization wrapper. Pass `protectedVariables` (rows to authorize) and an
-  optional `finalReturn` — the projection/aggregate runs **after** filtering.
+- **`secure-read-cypher`** — the open-ended path: run a model-generated MATCH
+  fragment (no `RETURN`) inside the authorization wrapper. Set
+  `security.expose_open_query_tool: false` to publish curated tools only.
 
-**YAML** (`tools/`) — `entitlement_directory`, identity/reference metadata only
-(groups and members; no permissioned business records). It shares the bundle and
-the connection, which is the point: mixed tool styles behind one gateway.
+**Curated YAML** (`tools/`), authored in the mediated `match:`/`scope:`/`return:`
+form so the engine inserts the filter between match and return:
 
-**Hidden:** raw `read-cypher` (via `downstream.hide`) because it would bypass the
-filter, and `write-cypher` (via `downstream.read_only: true`, so the official
-server never registers it).
+- **`client_activity`** — trades for a client. The **production-shaped path**: a
+  human wrote the Cypher, so the inference-oracle risk of open-ended generation
+  doesn't apply, and the same tool returns different rows per caller.
+- **`entitlement_directory`** — identity/reference metadata (groups and members),
+  no business records.
+
+**Hidden:** raw `read-cypher` — automatically, because mediation is on (no
+`downstream.hide` entry needed) — and `write-cypher` via
+`downstream.read_only: true`, so the official server never registers it.
 
 ## Run it
 
@@ -58,8 +66,15 @@ ACTIVE_BUNDLE=iam uv run neo4j-mcp-gateway         # or --bundle iam
 > The official downstream server requires the **APOC** plugin (`apoc.meta`) for
 > `get-schema`. Aura has it; a bare local Neo4j needs `NEO4J_PLUGINS='["apoc"]'`.
 
-`scripts/try_tool.py` exercises **YAML** tools (`entitlement_directory`); the
-code-backed tools run through the MCP Inspector or a client.
+`scripts/try_tool.py` runs the curated tools, including as another persona:
+
+```bash
+ACTIVE_BUNDLE=iam uv run python scripts/try_tool.py client_activity \
+  client="Acme Corp" principal=joe.hart@bank.com
+```
+
+The engine tools (`resolve-identity`, `secure-read-cypher`) run through the MCP
+Inspector or a client.
 
 ## Connection
 
