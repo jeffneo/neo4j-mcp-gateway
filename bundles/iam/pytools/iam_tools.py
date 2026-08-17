@@ -23,6 +23,8 @@ from fastmcp.tools.function_tool import FunctionTool
 from gateway.pytools import ToolContext
 
 SECURE_AUTH_PRINCIPAL_PARAM = "__secure_auth_principal"
+SECURE_PERM_PROPERTY_PARAM = "__secure_perm_property"
+_RESERVED_PARAMS = (SECURE_AUTH_PRINCIPAL_PARAM, SECURE_PERM_PROPERTY_PARAM)
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Blocked in a generated fragment (it must be a read-only MATCH fragment, no RETURN).
@@ -31,6 +33,12 @@ _FRAGMENT_BLOCKED = re.compile(
     r"revoke|load\s+csv|periodic\s+commit|use|profile)\b"
 )
 _FRAGMENT_BLOCKED_CALL = re.compile(r"\bcall\s+(dbms|db\.|apoc|gds)\.")
+# Subquery expressions are an INFERENCE CHANNEL: they can test for the existence
+# of data without ever binding it to a scope variable, so the entitlement filter
+# never sees it (e.g. MATCH (x:Public) WHERE EXISTS { MATCH (t:Trade {id:'X'}) }).
+# Blocked outright in mediated reads. Curated YAML tools don't have this problem
+# because a human authored the query.
+_FRAGMENT_BLOCKED_SUBQUERY = re.compile(r"\b(exists|count|collect|call)\s*\{|\bexists\s*\(")
 # Blocked in finalReturn (must be a bare RETURN projection/aggregate).
 _FINAL_BLOCKED = re.compile(
     r"\b(match|with|call|create|merge|delete|detach\s+delete|set|remove|drop|alter|"
@@ -87,11 +95,23 @@ CALL {
   RETURN @@SCOPE_JOIN@@
 }
 WITH @@SCOPE_WITH@@
+// (a) Explicitly declared variables: STRICT. Must carry the permissions property
+//     and match the caller — a record with no ACL is denied, not waved through.
 WHERE all(resource IN [@@PROTECTED@@] WHERE resource IS NULL OR (
   (authz.tenantId IS NULL OR resource.tenantId IS NULL OR resource.tenantId = authz.tenantId)
-  AND any(principal IN coalesce(resource['Permissions.Read'], [])
+  AND any(principal IN coalesce(resource[$@@PERMPARAM@@], [])
           WHERE principal IN authz.authzPrincipals)
 ))
+// (b) Every OTHER variable in scope: DERIVED. This is the safety net that makes
+//     the filter independent of what the caller declared. Anything carrying the
+//     permissions property must match; anything without one is reference data.
+AND all(resource IN [@@DERIVED@@] WHERE resource IS NULL
+  OR resource[$@@PERMPARAM@@] IS NULL
+  OR (
+    (authz.tenantId IS NULL OR resource.tenantId IS NULL OR resource.tenantId = authz.tenantId)
+    AND any(principal IN resource[$@@PERMPARAM@@]
+            WHERE principal IN authz.authzPrincipals)
+  ))
 @@FINAL@@"""
 
 
@@ -226,6 +246,11 @@ def _validate_fragment(query: str) -> None:
         raise ToolError("secure-read-cypher accepts exactly one fragment; semicolons are not allowed")
     if _FRAGMENT_BLOCKED.search(normalized) or _FRAGMENT_BLOCKED_CALL.search(normalized):
         raise ToolError("generated query fragment contains a clause or procedure that is not allowed")
+    if _FRAGMENT_BLOCKED_SUBQUERY.search(normalized):
+        raise ToolError(
+            "subquery expressions (EXISTS/COUNT/COLLECT/CALL {...}) are not allowed in a mediated "
+            "fragment: they can test for data that never enters the authorization filter"
+        )
 
 
 def _secure_final_return(final_return: str | None, return_vars: list[str]) -> str:
@@ -243,13 +268,19 @@ def _secure_final_return(final_return: str | None, return_vars: list[str]) -> st
 
 
 def _build_secure_query(fragment: str, protected: list[str], scope: list[str], final_return: str) -> str:
+    # Derived = everything in scope the caller did NOT explicitly protect. These
+    # still get filtered, so the security boundary no longer depends on the
+    # caller (i.e. the model) declaring a complete protectedVariables list.
+    derived = [v for v in scope if v not in protected]
     return (
         _SECURE_TEMPLATE
         .replace("@@AUTHPARAM@@", SECURE_AUTH_PRINCIPAL_PARAM)
+        .replace("@@PERMPARAM@@", SECURE_PERM_PROPERTY_PARAM)
         .replace("@@FRAGMENT@@", fragment)
         .replace("@@SCOPE_JOIN@@", ", ".join(scope))
         .replace("@@SCOPE_WITH@@", ", ".join(["authz"] + scope))
         .replace("@@PROTECTED@@", ", ".join(protected))
+        .replace("@@DERIVED@@", ", ".join(derived))
         .replace("@@FINAL@@", final_return)
     )
 
@@ -261,15 +292,19 @@ def _build_secure_read_cypher(ctx: ToolContext) -> FunctionTool:
             raise ToolError("query is required and cannot be empty")
         _validate_fragment(query)
 
+        # protectedVariables is now OPTIONAL and advisory: listing a variable opts
+        # it into strict treatment (must carry an ACL). Every variable in scope is
+        # filtered regardless, so an incomplete list can no longer leak rows.
         protected = _normalize_identifiers(kwargs.get("protectedVariables"), "protectedVariables")
-        if not protected:
-            raise ToolError("protectedVariables must list at least one returned node variable to authorize")
-
-        return_vars = kwargs.get("returnVariables") or protected
-        return_vars = _normalize_identifiers(return_vars, "returnVariables")
+        return_vars = _normalize_identifiers(kwargs.get("returnVariables") or [], "returnVariables")
         scope = _unique(protected + return_vars)
+        if not scope:
+            raise ToolError(
+                "declare the variables your fragment produces via returnVariables "
+                "(and optionally protectedVariables for strict checking)"
+            )
 
-        final_return = _secure_final_return(kwargs.get("finalReturn"), return_vars)
+        final_return = _secure_final_return(kwargs.get("finalReturn"), scope)
 
         base, source = _resolve_env_principal()
         if not base:
@@ -279,10 +314,12 @@ def _build_secure_read_cypher(ctx: ToolContext) -> FunctionTool:
         principal, _ = _apply_impersonation(base, source, kwargs.get("principal"))
 
         user_params = kwargs.get("params") or {}
-        if SECURE_AUTH_PRINCIPAL_PARAM in user_params:
-            raise ToolError(f"params cannot include reserved key {SECURE_AUTH_PRINCIPAL_PARAM!r}")
+        for reserved in _RESERVED_PARAMS:
+            if reserved in user_params:
+                raise ToolError(f"params cannot include reserved key {reserved!r}")
         params = dict(user_params)
         params[SECURE_AUTH_PRINCIPAL_PARAM] = principal
+        params[SECURE_PERM_PROPERTY_PARAM] = ctx.config.security.permissions_property
 
         wrapped = _build_secure_query(query, protected, scope, final_return)
         try:
@@ -295,25 +332,31 @@ def _build_secure_read_cypher(ctx: ToolContext) -> FunctionTool:
     return FunctionTool(
         name="secure-read-cypher",
         description=(
-            "Run a generated read-only Cypher MATCH fragment inside an IAM authorization "
-            "wrapper. The fragment must NOT contain RETURN. Pass protectedVariables (node "
-            "variables to authorize, e.g. [\"j\"]) and an optional finalReturn for the "
-            "projection/aggregate, which runs AFTER IAM filtering."
+            "Run a generated read-only Cypher MATCH fragment inside an entitlement "
+            "authorization wrapper. The fragment must NOT contain RETURN and may not use "
+            "EXISTS/COUNT/COLLECT/CALL subqueries. List the variables it produces in "
+            "returnVariables; every one is filtered against the caller's entitlements. Put "
+            "any projection or aggregate in finalReturn — it runs AFTER filtering, so counts "
+            "and sums reflect only rows the caller may see."
         ),
+        # No 'required' on protectedVariables: filtering no longer depends on it.
         parameters={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Read-only MATCH fragment; no RETURN."},
                 "params": {"type": "object", "description": "Parameters for the fragment.", "additionalProperties": True},
                 "protectedVariables": {"type": "array", "items": {"type": "string"},
-                                       "description": "Node variables that must pass IAM checks."},
+                                       "description": "Optional. Variables to check strictly: each must carry an "
+                                                      "access-control list or the row is dropped. Every variable in "
+                                                      "scope is filtered regardless of this list."},
                 "returnVariables": {"type": "array", "items": {"type": "string"},
-                                    "description": "Variables kept in scope for the final return. Defaults to protectedVariables."},
+                                    "description": "Variables your fragment produces that must stay in scope for the "
+                                                   "final return. At least one of this or protectedVariables is required."},
                 "finalReturn": {"type": "string",
                                 "description": "RETURN clause applied after IAM filtering, e.g. RETURN count(DISTINCT j) AS n."},
                 "principal": {"type": "string", "description": "Optional impersonation principal (requires NEO4J_MCP_ALLOW_IMPERSONATION=true)."},
             },
-            "required": ["query", "protectedVariables"],
+            "required": ["query"],
             "additionalProperties": False,
         },
         fn=handler,

@@ -39,7 +39,7 @@ lives in a **bundle** — a self-contained folder under `bundles/`:
 ```
 bundles/<name>/
   bundle.yaml     # metadata only (name, description, model instructions,
-                  #   downstream.read_only, downstream.hide, tool prefix) — NO secrets
+                  #   REQUIRED security.mode, downstream.*, tool prefix) — NO secrets
   .env            # optional, git-ignored: this bundle's Neo4j connection override
   tools/*.yaml    # static parameterized use-case tools
   pytools/*.py    # code-backed tools (build_tools(ctx) -> [Tool]) for logic that
@@ -73,9 +73,32 @@ via `env`:
 }
 ```
 
-Shipped bundles: **`ato`** (account-takeover; 7 YAML tools) and **`iam`** (identity &
-access management; query-mediated access control with code-backed `resolve-identity`
-+ `secure-read-cypher`, and raw `read-cypher` hidden so it can't bypass the filter).
+### Access mode is a required declaration
+
+Every `bundle.yaml` **must** state `security.mode` — there is no default, so
+"unfiltered" is a recorded decision rather than something that happens by omission:
+
+```yaml
+security:
+  mode: open        # tools read directly (all consumers uniformly entitled)
+  # mode: mediated  # every read is entitlement-filtered against the caller
+```
+
+Under `mediated`, reads are wrapped in an authorization prelude and every variable
+the query produces is filtered against the caller's principals. Declare
+`protected_labels` so [`scripts/validate_bundle.py`](scripts/validate_bundle.py)
+fails when a business record is missing its access-control list — otherwise such a
+record silently flows to everyone.
+
+> **Note:** `get-schema` stays exposed even under `mediated`, because
+> text-to-Cypher needs it. It reveals structure (labels, relationship types,
+> property keys) but no row data. Add it to `downstream.hide` if your deployment
+> treats the schema itself as sensitive.
+
+Shipped bundles: **`ato`** (account-takeover; 7 YAML tools; `mode: open`) and
+**`iam`** (investment-bank entitlements; `mode: mediated`, code-backed
+`resolve-identity` + `secure-read-cypher`, raw `read-cypher` hidden so it cannot
+bypass the filter).
 
 ---
 

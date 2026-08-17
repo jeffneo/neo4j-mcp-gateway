@@ -33,6 +33,18 @@ instructions: >
 # IAM often lives on its own instance — drop a .env here with NEO4J_URI/USERNAME/
 # PASSWORD/DATABASE to point this bundle there. See .env.example.
 
+# REQUIRED. Every read is wrapped in an authorization prelude and filtered
+# against the caller's principals before rows are returned.
+security:
+  mode: mediated
+  permissions_property: "Permissions.Read"
+  # Labels expected to carry the permissions property. scripts/validate_bundle.py
+  # fails if any such record is missing it — without this guard an unpermissioned
+  # business record would flow as reference data (fail open).
+  protected_labels: [Communication, Request, Trade, Deal]
+
 downstream:
   read_only: true          # hide the downstream write-cypher tool
   hide: [read-cypher]      # hide raw read-cypher — secure-read-cypher replaces it
+  # NOTE: get-schema stays exposed — text2cypher needs it to author fragments.
+  # It discloses structure (labels, relationship types, property keys), not rows.

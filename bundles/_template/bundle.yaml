@@ -9,6 +9,16 @@ instructions: >
   TODO: describe the graph this bundle analyses and what the usecase_ tools do,
   so an assistant can choose the right tool from a plain-language question.
 
+# REQUIRED — state how this bundle exposes data. There is no default: choosing
+# 'open' should be a recorded decision, not something that happens by omission.
+#   open     = tools read directly (fine when every consumer is uniformly entitled)
+#   mediated = every read is entitlement-filtered against the caller's principals
+security:
+  mode: open
+  # When mediated, also set:
+  # permissions_property: "Permissions.Read"
+  # protected_labels: [YourBusinessRecordLabel]
+
 downstream:
   read_only: false        # set true to hide the downstream write-cypher tool
   # hide: [read-cypher]   # hide specific proxied tools from clients entirely

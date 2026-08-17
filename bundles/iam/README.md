@@ -67,15 +67,46 @@ Env only — inherit the root `.env`, or drop a git-ignored `.env` here (see
 [`.env.example`](.env.example)) to point IAM at its **own** Neo4j instance or
 database. No credentials in `bundle.yaml`.
 
+## How filtering decides (derived protection)
+
+Every variable your fragment produces is filtered — the boundary does **not**
+depend on the caller declaring a complete `protectedVariables` list:
+
+| Variable | Outcome |
+| --- | --- |
+| `null` (OPTIONAL MATCH miss) | passes |
+| carries `Permissions.Read` | must intersect the caller's principals |
+| no `Permissions.Read` | passes as **reference data** (Client, AdGroup, Desk…) |
+| listed in `protectedVariables` | **strict**: must carry an ACL *and* match |
+
+`protectedVariables` is therefore optional and advisory — use it to force
+fail-closed on a specific variable. Aggregates in `finalReturn` run *after*
+filtering, so counts and sums are per-entitlement.
+
 ## Security notes
 
-- The entitlement filter is applied by `secure-read-cypher`; the gateway is the
-  enforcement boundary. Anyone who can reach the Neo4j instance directly (or run
+- **`get-schema` is intentionally left exposed.** Text-to-Cypher needs it to
+  author valid fragments. It discloses *structure* — labels, relationship types,
+  property keys, including the fact that `Permissions.Read` exists — but never
+  row data. If a deployment treats the schema itself as sensitive, add
+  `get-schema` to `downstream.hide` and supply the model a curated schema summary
+  in `instructions` instead.
+- The entitlement filter is applied by the gateway; **the gateway is the
+  enforcement boundary**. Anyone who can reach the Neo4j instance directly (or run
   the official server themselves) is bounded only by Neo4j's own auth — treat DB
   credentials accordingly.
+- **Fail-open on missing ACLs is real.** A record carrying a protected label but
+  no `Permissions.Read` flows to everyone as reference data. `protected_labels`
+  in `bundle.yaml` makes `scripts/validate_bundle.py` fail on exactly that, so it
+  is caught in CI rather than in production. Run it after every data load.
 - Defence in depth on the generated fragment: a blocklist rejects `RETURN`,
-  writes and `CALL apoc|gds|dbms|db.`, **and** execution happens in a Neo4j read
-  transaction, so a write is refused by the server (`AccessMode` error) even if a
-  fragment slipped past the regex.
+  writes, `CALL apoc|gds|dbms|db.` and `EXISTS/COUNT/COLLECT/CALL {…}` subquery
+  expressions (an inference channel — they can test for data that never enters
+  the filter), **and** execution happens in a Neo4j read transaction, so a write
+  is refused by the server (`AccessMode`) even if a fragment slipped past.
+- **Residual limitation:** inline pattern predicates in `WHERE` can still act as
+  an existence oracle. Curated (YAML) tools avoid this class entirely because a
+  human authored the query — prefer them in production, and treat the open-ended
+  tool as an exploration path.
 - `NEO4J_MCP_ALLOW_IMPERSONATION` is for demos. Leave it unset in production so a
   caller cannot choose their own principal.

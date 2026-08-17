@@ -20,6 +20,12 @@ instructions: >
 # Connection comes from env only: root .env, overridden by a git-ignored
 # bundles/ato/.env if you want this bundle on its own Neo4j instance/database.
 
+# REQUIRED. 'open' is a deliberate choice here, not a default: the consumers of
+# this bundle are a fraud-ops team uniformly entitled to the whole fraud graph,
+# so tools read directly with no per-row entitlement filtering.
+security:
+  mode: open
+
 # Downstream official server: allow write-cypher (set true to lock the demo down).
 downstream:
   read_only: false

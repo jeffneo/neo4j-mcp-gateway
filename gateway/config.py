@@ -29,7 +29,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values, find_dotenv
 
-from .bundles import BundleManifest, list_bundles, load_manifest
+from .bundles import BundleManifest, SecurityPolicy, list_bundles, load_manifest
 
 # Project root = the directory that contains the ``gateway/`` package.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -122,6 +122,9 @@ class Config:
 
     # Proxied downstream tools to hide from clients (e.g. ['read-cypher']).
     hide_tools: list[str] = field(default_factory=list)
+
+    # How this bundle exposes data (open vs entitlement-mediated).
+    security: SecurityPolicy = field(default_factory=lambda: SecurityPolicy(mode="open"))
 
     # --- Server identity (model-facing) ---
     server_name: str = "neo4j-mcp-gateway"
@@ -217,6 +220,7 @@ class Config:
             data_dir=bundle_dir / "data",
             usecase_prefix=os.getenv("USECASE_PREFIX") or manifest.usecase_prefix or "usecase_",
             hide_tools=list(manifest.hide_tools or []),
+            security=manifest.security or SecurityPolicy(mode="open"),
             server_name=os.getenv("GATEWAY_NAME") or manifest.name or "neo4j-mcp-gateway",
             instructions=manifest.instructions or default_instructions,
         )

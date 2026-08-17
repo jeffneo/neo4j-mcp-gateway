@@ -17,10 +17,39 @@ use case — only the bundle does.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+MODE_OPEN = "open"
+MODE_MEDIATED = "mediated"
+VALID_MODES = (MODE_OPEN, MODE_MEDIATED)
+
+
+@dataclass
+class SecurityPolicy:
+    """How a bundle exposes its data. Declared under ``security:`` in bundle.yaml.
+
+    ``mode`` is REQUIRED — every bundle must state its posture, so "no entitlement
+    filtering" is a recorded decision rather than a silent default.
+
+    * ``open``     — tools read the graph directly. Appropriate when every consumer
+                     of this bundle is uniformly entitled to all of its data.
+    * ``mediated`` — reads are wrapped in an authorization prelude and filtered
+                     against the caller's principals before rows are returned.
+    """
+
+    mode: str
+    permissions_property: str = "Permissions.Read"
+    # Labels that are expected to carry ``permissions_property``. Used by
+    # scripts/validate_bundle.py as a fail-closed data-quality guard: a record
+    # that should be permissioned but isn't would otherwise flow as reference data.
+    protected_labels: list[str] = field(default_factory=list)
+
+    @property
+    def mediated(self) -> bool:
+        return self.mode == MODE_MEDIATED
 
 
 @dataclass
@@ -36,6 +65,7 @@ class BundleManifest:
     name: str
     description: str = ""
     instructions: str = ""
+    security: "SecurityPolicy | None" = None  # required in bundle.yaml (see load_manifest)
     read_only: bool | None = None        # optional downstream write-cypher toggle
     hide_tools: list[str] | None = None  # proxied tool names to hide (e.g. read-cypher)
     usecase_prefix: str | None = None    # optional tool-name namespace override
@@ -51,6 +81,27 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
     if not isinstance(raw, dict):
         raise ValueError(f"{f}: top level must be a mapping")
 
+    # security.mode is REQUIRED: every bundle states whether its data is filtered.
+    sec_raw = raw.get("security")
+    if not isinstance(sec_raw, dict) or not sec_raw.get("mode"):
+        raise ValueError(
+            f"{f}: 'security.mode' is required and must be one of {list(VALID_MODES)}.\n"
+            f"  Add to {bundle_dir.name}/bundle.yaml:\n"
+            f"    security:\n"
+            f"      mode: open        # or 'mediated' to entitlement-filter every read"
+        )
+    mode = str(sec_raw["mode"]).strip().lower()
+    if mode not in VALID_MODES:
+        raise ValueError(f"{f}: security.mode must be one of {list(VALID_MODES)}, got {mode!r}")
+    protected_labels = sec_raw.get("protected_labels") or []
+    if not isinstance(protected_labels, list):
+        raise ValueError(f"{f}: security.protected_labels must be a list of labels")
+    security = SecurityPolicy(
+        mode=mode,
+        permissions_property=str(sec_raw.get("permissions_property") or "Permissions.Read"),
+        protected_labels=[str(x) for x in protected_labels],
+    )
+
     downstream = raw.get("downstream") or {}
     if not isinstance(downstream, dict):
         downstream = {}
@@ -63,6 +114,7 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
         name=raw.get("name") or bundle_dir.name,
         description=raw.get("description", "") or "",
         instructions=raw.get("instructions", "") or "",
+        security=security,
         read_only=read_only,
         hide_tools=[str(t) for t in hide_tools],
         usecase_prefix=raw.get("usecase_prefix"),

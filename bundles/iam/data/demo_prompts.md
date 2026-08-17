@@ -19,6 +19,11 @@ ACTIVE_BUNDLE=iam uv run neo4j-mcp-gateway
 `NEO4J_MCP_ALLOW_IMPERSONATION` is what lets one operator demo every seat. In a
 real deployment you drop it and identity comes from SSO (Basic/JWT) instead.
 
+> The calls below pass `protectedVariables` for clarity, but it is **optional**:
+> every variable the fragment produces is filtered regardless. That is deliberate —
+> the security boundary must not depend on what the model chose to declare. If you
+> want a good moment on stage, delete the line and show the answer is identical.
+
 ## The cast
 
 | Principal | Role | Entitlement groups |
