@@ -27,7 +27,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, find_dotenv
 
 from .bundles import BundleManifest, list_bundles, load_manifest
 
@@ -37,13 +37,51 @@ BUNDLES_DIR = PROJECT_ROOT / "bundles"
 DEFAULT_BUNDLE = "ato"
 
 
+# Values injected into os.environ from .env files, mapped to what was there
+# before, so a later resolution can undo them. Without this, resolving bundle A
+# (whose .env sets NEO4J_URI) and then bundle B in the same process would leak
+# A's connection into B — which breaks multi-bundle tooling like validate_bundle.
+_DOTENV_INJECTED: dict[str, str | None] = {}
+
+
+def _undo_dotenv_injections() -> None:
+    """Restore os.environ to its pre-.env state for keys we injected."""
+    for key, original in _DOTENV_INJECTED.items():
+        if original is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = original
+    _DOTENV_INJECTED.clear()
+
+
+def _apply_env_file(path: Path, override: bool) -> None:
+    """Layer a ``.env`` file into os.environ, remembering how to undo it.
+
+    ``override=False`` (root ``.env``) lets real process environment win, so a
+    client's ``env`` block still takes precedence. ``override=True`` (bundle
+    ``.env``) wins outright — it is the most specific declaration for that bundle.
+    Values land in os.environ so tools that read env directly (e.g. the IAM
+    ``NEO4J_MCP_PRINCIPAL``) see them too.
+    """
+    for key, value in dotenv_values(path).items():
+        if value is None:
+            continue
+        if not override and os.environ.get(key):
+            continue
+        if key not in _DOTENV_INJECTED:
+            _DOTENV_INJECTED[key] = os.environ.get(key)
+        os.environ[key] = value
+
+
 def _load_root_env() -> None:
     """Load the repo-root ``.env`` (shared defaults) if present."""
     root_env = PROJECT_ROOT / ".env"
     if root_env.exists():
-        load_dotenv(root_env)
+        _apply_env_file(root_env, override=False)
     else:
-        load_dotenv()  # fall back to a cwd-upward search
+        found = find_dotenv(usecwd=True)  # fall back to a cwd-upward search
+        if found:
+            _apply_env_file(Path(found), override=False)
 
 
 def _env(name: str, default: str) -> str:
@@ -118,6 +156,9 @@ class Config:
         ``bundles/``. Loads the root ``.env`` then the bundle's ``.env`` (which
         overrides), then reads ``bundle.yaml`` for non-secret declarations.
         """
+        # Start from a clean slate so resolving several bundles in one process
+        # is deterministic (no leakage from a previously loaded bundle .env).
+        _undo_dotenv_injections()
         _load_root_env()
 
         active = active_bundle or os.getenv("ACTIVE_BUNDLE") or DEFAULT_BUNDLE
@@ -132,7 +173,7 @@ class Config:
         # Per-bundle .env overrides the root .env (credentials, or NEO4J_MCP_CMD, ...).
         bundle_env = bundle_dir / ".env"
         if bundle_env.exists():
-            load_dotenv(bundle_env, override=True)
+            _apply_env_file(bundle_env, override=True)
 
         manifest = load_manifest(bundle_dir)
 

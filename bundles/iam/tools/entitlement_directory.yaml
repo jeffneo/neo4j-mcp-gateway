@@ -1,0 +1,30 @@
+# A plain YAML tool living alongside the code-backed IAM tools in the SAME bundle
+# and on the SAME connection — this is what "mixed tooling behind one gateway"
+# looks like in practice.
+#
+# SCOPE: identity/reference metadata only (groups and their members). It never
+# touches nodes carrying `Permissions.Read`, so it cannot leak client
+# communications, requests, trades, or deals — those are only reachable through
+# secure-read-cypher, which applies the entitlement filter.
+name: entitlement_directory
+description: >
+  List the entitlement groups in the identity model (coverage teams, desks,
+  operations, control functions, named deal teams) with their members. Reference
+  metadata for explaining WHY a user can see something; returns no client
+  business records. For any client data use secure-read-cypher instead.
+parameters:
+  - name: group_name
+    type: string
+    description: Filter to a single group name (e.g. coverage-acme). Empty string returns all groups.
+    required: false
+    default: ""
+cypher: |
+  MATCH (g:AdGroup)
+  WHERE $group_name = '' OR g.name = $group_name
+  OPTIONAL MATCH (u:User)-[:MEMBER_OF]->(g)
+  RETURN g.name AS group,
+         g.kind AS kind,
+         count(u) AS memberCount,
+         collect(u.email) AS members
+  ORDER BY kind, group
+read_only: true

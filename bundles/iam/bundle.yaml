@@ -5,19 +5,29 @@
 # resolves the user's effective groups, and secure-read-cypher composes an
 # authorization wrapper around a generated Cypher fragment before Neo4j runs it.
 name: neo4j-iam-gateway
-description: IAM-aware graph access — resolve identity and run IAM-filtered reads.
+description: Investment-bank entitlements — identity-resolved, filtered reads over client data.
 
 instructions: >
-  This gateway enforces graph-level access control. Permissions are stored as
-  list-valued properties on domain nodes, e.g. a (:Job) with `Permissions.Read`,
-  `Permissions.Create`, `Permissions.Update`, `Permissions.Delete`. A user's
-  effective principals are their username, 'everyone', their AdGroupList, and any
-  groups reachable via MEMBER_OF. WORKFLOW: (1) call resolve-identity first to
-  confirm the principal and its IAM groups; (2) for every data question call
-  secure-read-cypher, passing a read-only MATCH fragment WITHOUT a RETURN, the
-  protectedVariables to authorize (e.g. ["j"]), and a finalReturn for any
-  projection/aggregate. Raw read-cypher is intentionally unavailable because it
-  would bypass the IAM filter — do not attempt writes or unrestricted queries.
+  This gateway enforces entitlement-aware access to an investment-banking graph.
+  Domain nodes carry a list-valued `Permissions.Read` property naming the
+  principals allowed to read that row. Entities: User, AdGroup, Desk, Client,
+  ClientContact, Communication (client chats/emails), Request (client RFQs),
+  Trade, Deal (wall-crossed, need-to-know) and ResearchNote. Relationships:
+  MEMBER_OF, COVERS, PARTICIPANT_IN, WITH_CLIENT, WITH_CONTACT, SUBMITTED,
+  BOOKED, FOR_CLIENT, BOOKED_ON, ON_BEHALF_OF, INVOLVES_CLIENT.
+  A caller's effective principals are their identity, 'everyone', their
+  AdGroupList, and groups reachable via MEMBER_OF — typically coverage teams
+  (coverage-acme), desks (desk-rates-emea), ops-settlements,
+  compliance-supervision, control-room and named deal teams.
+  WORKFLOW: (1) call resolve-identity first to confirm the principal and its
+  entitlement groups; (2) for every data question call secure-read-cypher with a
+  read-only MATCH fragment WITHOUT a RETURN, the protectedVariables to authorize
+  (e.g. ["t"] for trades), and a finalReturn for any projection or aggregate,
+  which runs AFTER filtering. Results are already entitlement-filtered: rows the
+  caller may not see simply do not appear, so never describe a result as the
+  complete firm-wide picture. Raw read-cypher is intentionally unavailable
+  because it would bypass the filter — do not attempt writes or unrestricted
+  queries.
 
 # Connection is env-only (root .env, overridden by a git-ignored bundles/iam/.env).
 # IAM often lives on its own instance — drop a .env here with NEO4J_URI/USERNAME/
