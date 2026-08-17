@@ -98,6 +98,35 @@ depend on the caller declaring a complete `protectedVariables` list:
 fail-closed on a specific variable. Aggregates in `finalReturn` run *after*
 filtering, so counts and sums are per-entitlement.
 
+## Deployment postures
+
+The bundle ships in **exploration** posture. To run the locked-down stance —
+curated, human-authored tools only, no runtime query generation:
+
+```bash
+EXPOSE_OPEN_QUERY_TOOL=false ACTIVE_BUNDLE=iam uv run neo4j-mcp-gateway
+```
+
+or make it permanent in `bundle.yaml`:
+
+```yaml
+security:
+  expose_open_query_tool: false
+```
+
+| | Exploration (default) | Curated only |
+| --- | --- | --- |
+| `resolve-identity` | ✅ | ✅ |
+| `secure-read-cypher` (model-generated) | ✅ | **not registered** |
+| `usecase_*` curated tools | ✅ entitlement-filtered | ✅ entitlement-filtered |
+| `read-cypher` / `write-cypher` | hidden / unregistered | hidden / unregistered |
+| Inference-channel risk | mitigated (blocklist) | **eliminated** — no runtime-generated Cypher |
+
+The env variable can only **tighten**: a bundle that declares
+`expose_open_query_tool: false` cannot be re-opened with
+`EXPOSE_OPEN_QUERY_TOOL=true`. Config is the floor. The active posture is printed
+in the gateway's startup log.
+
 ## Security notes
 
 - **`get-schema` is intentionally left exposed.** Text-to-Cypher needs it to

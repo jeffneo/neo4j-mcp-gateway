@@ -145,8 +145,8 @@ Say this before you're asked:
   the assistant channel.
 - **Open-ended queries have a residual inference channel.** A generated fragment
   can, in principle, use a pattern as an existence test for data it can't read. We
-  block the common forms; curated tools avoid the class entirely — which is why we
-  recommend them for production, and why a bundle can publish curated tools _only_.
+  block the common forms — and if that residual risk isn't acceptable, one config
+  line removes the class entirely (see §7).
 - **Read-side only.** Mediation covers reads; mediated bundles are read-only by
   design rather than pretending to authorize writes.
 - **No provenance yet** (see §3). "Why does Joe have access?" needs the
@@ -154,7 +154,43 @@ Say this before you're asked:
 
 ---
 
-## 7. The 60-second demo (≈1 min)
+## 7. Three postures, one architecture (≈1.5 min)
+
+The same engine supports three deployment stances. This is usually the answer a
+security architect is actually looking for — you're not defending one design, you
+are showing a dial:
+
+| Posture | Config | Who writes the Cypher | Use for |
+| --- | --- | --- | --- |
+| **Open** | `mode: open` | humans (curated), unfiltered | data where every consumer is uniformly entitled (our fraud bundle) |
+| **Exploration** | `mode: mediated` | humans **and** the model | analyst desktop; maximum flexibility, fully entitled |
+| **Curated only** | `mode: mediated`<br>`expose_open_query_tool: false` | humans only | regulated production workflows |
+
+In **curated only**, the open-ended `secure-read-cypher` is never registered — the
+assistant's entire vocabulary is the set of reviewed tools you shipped. Since no
+query is generated at runtime, the inference channel in §6 cannot occur at all.
+It's the difference between screening dangerous query shapes and making them
+impossible.
+
+The tradeoff is real and worth saying out loud: the assistant can only answer
+questions your curated tools cover. Ask something nobody anticipated and there is
+no path to the data. That is often exactly what a regulated workflow wants.
+
+Two properties worth mentioning:
+
+- **The posture is visible.** The gateway logs which stance it started in.
+- **Config is the floor.** `EXPOSE_OPEN_QUERY_TOOL=false` in the environment can
+  *tighten* a deployment, but a bundle that declares curated-only cannot be
+  re-opened from the shell. → `Config.from_env()` in
+  [`gateway/config.py`](../gateway/config.py)
+
+**Where it lives:** `build_security_tools()` in
+[`gateway/security_tools.py`](../gateway/security_tools.py) decides which tools a
+mediated bundle publishes.
+
+---
+
+## 8. The 60-second demo (≈1 min)
 
 Ask the same question as two people:
 

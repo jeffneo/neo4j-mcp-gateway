@@ -106,6 +106,13 @@ return: |               # runs AFTER filtering, so aggregates are per-entitlemen
   RETURN t.tradeId AS tradeId, t.notional AS notional
 ```
 
+**Postures.** A mediated bundle can publish curated tools *only* by setting
+`security.expose_open_query_tool: false` (or `EXPOSE_OPEN_QUERY_TOOL=false` at
+runtime). The open-ended `secure-read-cypher` is then never registered, so no
+Cypher is generated at runtime — the stance for regulated workflows. The env
+variable can only tighten: a bundle declaring curated-only cannot be re-opened
+from the shell.
+
 Declare `protected_labels` so [`scripts/validate_bundle.py`](scripts/validate_bundle.py)
 fails when a business record is missing its access-control list — otherwise such a
 record silently flows to everyone. The validator also persona-diffs mediated tools
@@ -164,6 +171,7 @@ to both the downstream official server and the YAML tool executor.
 | `NEO4J_READ_ONLY` | *(unset)* | `true` disables downstream `write-cypher` |
 | `NEO4J_TELEMETRY` | `false` | Downstream telemetry opt-in |
 | `ACTIVE_BUNDLE` | `ato` | Which bundle under `bundles/` to serve |
+| `EXPOSE_OPEN_QUERY_TOOL` | *(bundle)* | Set `false` to drop `secure-read-cypher` (tighten only) |
 | `USECASE_PREFIX` | `usecase_` | Tool-name prefix (also settable in `bundle.yaml`) |
 
 Tools and data come from the active bundle (`bundles/<ACTIVE_BUNDLE>/`); the

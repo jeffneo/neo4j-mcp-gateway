@@ -162,6 +162,27 @@ the entitlement filter.
 endpoint serves every desk, and each person's assistant answers from exactly the
 rows they're cleared to see — including the aggregates."*
 
+## If they push on the open-ended tool
+
+Expect: *"You're letting an LLM write queries against our data."* The answer is a
+dial, not a defence — restart in the locked-down posture and re-run the demo:
+
+```bash
+EXPOSE_OPEN_QUERY_TOOL=false ACTIVE_BUNDLE=iam uv run neo4j-mcp-gateway
+```
+
+`secure-read-cypher` is now **not registered at all**. The assistant's entire
+vocabulary is the curated tools you reviewed and shipped — `usecase_client_activity`
+still answers Scenario 3 and is still filtered per caller. No Cypher is generated
+at runtime, so that whole class of concern disappears rather than being mitigated.
+
+> **Say:** "For an analyst desktop we'd leave the open-ended tool on — it's fully
+> entitled either way. For a regulated production workflow, this is one config
+> line, and every query path has been through review. Same architecture."
+
+Worth adding: the environment can only *tighten* this. A bundle that ships
+curated-only cannot be re-opened with an environment variable.
+
 ## Autonomous variant
 
 > "You are a markets assistant for a tier-1 bank with entitlement-aware graph

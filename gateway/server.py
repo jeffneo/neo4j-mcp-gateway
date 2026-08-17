@@ -40,7 +40,13 @@ def build_gateway(config: Config | None = None) -> FastMCP:
     config = config or Config.from_env()
 
     _log(f"active bundle: {config.active_bundle}  ({config.bundle.description or 'no description'})")
-    _log(f"security mode: {config.security.mode}")
+    if config.security.mediated:
+        posture = ("mediated (exploration: curated tools + open-ended secure-read-cypher)"
+                   if config.security.expose_open_query_tool
+                   else "mediated (curated only: no open-ended query tool)")
+    else:
+        posture = "open (no entitlement filtering)"
+    _log(f"security posture: {posture}")
 
     # Under mediation, the proxied raw read tool would bypass the entitlement
     # filter entirely, so it is hidden by default rather than by convention.

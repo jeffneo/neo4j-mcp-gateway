@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from dotenv import dotenv_values, find_dotenv
@@ -200,6 +200,14 @@ class Config:
         tools_override = os.getenv("TOOLS_DIR")
         tools_dir = Path(tools_override).expanduser() if tools_override else bundle_dir / "tools"
 
+        # Security posture can be TIGHTENED by env but never loosened: config is
+        # the floor. EXPOSE_OPEN_QUERY_TOOL=false drops the open-ended
+        # secure-read-cypher, leaving only curated (human-authored) mediated tools.
+        # A bundle that already declared it off cannot be re-opened from the shell.
+        policy = manifest.security
+        if policy is not None and _env_bool("EXPOSE_OPEN_QUERY_TOOL") is False:
+            policy = replace(policy, expose_open_query_tool=False)
+
         default_instructions = (
             f"Neo4j gateway for the '{active}' use case. Generic tools "
             "(get-schema, read-cypher, write-cypher, list-gds-procedures) are proxied "
@@ -220,7 +228,7 @@ class Config:
             data_dir=bundle_dir / "data",
             usecase_prefix=os.getenv("USECASE_PREFIX") or manifest.usecase_prefix or "usecase_",
             hide_tools=list(manifest.hide_tools or []),
-            security=manifest.security or SecurityPolicy(mode="open"),
+            security=policy or SecurityPolicy(mode="open"),
             server_name=os.getenv("GATEWAY_NAME") or manifest.name or "neo4j-mcp-gateway",
             instructions=manifest.instructions or default_instructions,
         )

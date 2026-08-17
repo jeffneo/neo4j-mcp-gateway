@@ -135,6 +135,8 @@ security:
     inline_group_list: AdGroupList
 
   expose_open_query_tool: true   # register secure-read-cypher (text2cypher path)
+                                 # [as built] EXPOSE_OPEN_QUERY_TOOL=false may
+                                 # tighten this at runtime, never loosen it
   allow_unmediated_read: false   # must be explicitly true to keep raw read-cypher
 ```
 
