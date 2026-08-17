@@ -268,6 +268,9 @@ class Neo4jExecutor:
             self._driver = neo4j.GraphDatabase.driver(
                 self._config.neo4j_uri,
                 auth=(self._config.neo4j_username, self._config.neo4j_password),
+                # The IAM auth prelude probes many optional property keys by design;
+                # silence the resulting "property key does not exist" notifications.
+                notifications_min_severity="OFF",
             )
         return self._driver
 

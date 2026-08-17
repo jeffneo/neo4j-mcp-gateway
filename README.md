@@ -38,17 +38,23 @@ lives in a **bundle** — a self-contained folder under `bundles/`:
 
 ```
 bundles/<name>/
-  bundle.yaml     # metadata + non-secret config (name, description, model instructions,
-                  #   optional database, downstream read_only, tool prefix)
-  .env            # optional, git-ignored: this bundle's Neo4j credentials
-  tools/*.yaml    # the use-case tools
+  bundle.yaml     # metadata only (name, description, model instructions,
+                  #   downstream.read_only, downstream.hide, tool prefix) — NO secrets
+  .env            # optional, git-ignored: this bundle's Neo4j connection override
+  tools/*.yaml    # static parameterized use-case tools
+  pytools/*.py    # code-backed tools (build_tools(ctx) -> [Tool]) for logic that
+                  #   isn't static Cypher (e.g. IAM secure-read-cypher)
   data/*.cypher   # demo dataset generator(s) + lab docs
 ```
 
 Pick the active bundle with `ACTIVE_BUNDLE` (or `--bundle`). The engine points the
 tools, data path, downstream connection, and the server's model-facing
-`instructions` at that bundle. **Config resolution:** root `.env` → bundle `.env`
-(overrides) → `bundle.yaml` (`database` and other declarations).
+`instructions` at that bundle.
+
+**Connection is env-only** — URI / username / password / database are read from
+the root `.env`, then a bundle's git-ignored `.env` **overrides** them. Nothing
+connection-related lives in `bundle.yaml`, so a bundle can target an entirely
+separate Neo4j instance (e.g. a different Aura) with no secrets in committed files.
 
 ```bash
 uv run neo4j-mcp-gateway --list-bundles          # ato, iam, …
@@ -67,8 +73,9 @@ via `env`:
 }
 ```
 
-Shipped bundles: **`ato`** (account-takeover, complete) and **`iam`** (identity &
-access management, skeleton — 3 stub tools + demo data to build out).
+Shipped bundles: **`ato`** (account-takeover; 7 YAML tools) and **`iam`** (identity &
+access management; query-mediated access control with code-backed `resolve-identity`
++ `secure-read-cypher`, and raw `read-cypher` hidden so it can't bypass the filter).
 
 ---
 
@@ -341,6 +348,8 @@ neo4j-mcp-gateway/
     server.py         # entrypoint: build proxy + load bundle tools + serve stdio
     proxy.py          # spawn & re-expose the official neo4j/mcp downstream
     yaml_tools.py     # YAML discovery, validation, MCP registration, Cypher execution
+    pytools.py        # load code-backed bundle tools (build_tools(ctx))
+    middleware.py     # HideToolsMiddleware (hide proxied tools, e.g. read-cypher)
     bundles.py        # bundle manifest parsing + discovery
     config.py         # env + active-bundle resolution
   scripts/
@@ -353,9 +362,10 @@ neo4j-mcp-gateway/
       bundle.yaml     #   metadata + non-secret config
       tools/*.yaml    #   the 7 ATO tools
       data/           #   ato_demo.cypher + lab docs
-    iam/              # identity & access management bundle (skeleton)
-      bundle.yaml
-      tools/*.yaml    #   3 stub tools to implement
+    iam/              # identity & access management bundle
+      bundle.yaml     #   read_only + hide: [read-cypher]
+      pytools/        #   resolve-identity + secure-read-cypher (code-backed)
+      data/iam_demo.cypher
       data/iam_demo.cypher
   .vscode/mcp.json
   .env.example        # root creds/defaults (per-bundle .env overrides)

@@ -25,13 +25,19 @@ import yaml
 
 @dataclass
 class BundleManifest:
-    """Parsed, non-secret configuration from a bundle's ``bundle.yaml``."""
+    """Parsed, non-secret configuration from a bundle's ``bundle.yaml``.
+
+    Deliberately holds NO connection details — Neo4j URI/user/password/database
+    are credentials/env concerns and live only in ``.env`` files (root, then the
+    bundle's git-ignored ``.env`` which overrides). A bundle may therefore point
+    at an entirely separate Neo4j instance without any secrets in committed YAML.
+    """
 
     name: str
     description: str = ""
     instructions: str = ""
-    database: str | None = None          # optional per-bundle Neo4j database
     read_only: bool | None = None        # optional downstream write-cypher toggle
+    hide_tools: list[str] | None = None  # proxied tool names to hide (e.g. read-cypher)
     usecase_prefix: str | None = None    # optional tool-name namespace override
     path: Path | None = None             # the bundle directory
 
@@ -46,14 +52,19 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
         raise ValueError(f"{f}: top level must be a mapping")
 
     downstream = raw.get("downstream") or {}
-    read_only = downstream.get("read_only") if isinstance(downstream, dict) else None
+    if not isinstance(downstream, dict):
+        downstream = {}
+    read_only = downstream.get("read_only")
+    hide_tools = downstream.get("hide") or []
+    if not isinstance(hide_tools, list):
+        raise ValueError(f"{f}: downstream.hide must be a list of tool names")
 
     return BundleManifest(
         name=raw.get("name") or bundle_dir.name,
         description=raw.get("description", "") or "",
         instructions=raw.get("instructions", "") or "",
-        database=raw.get("database"),
         read_only=read_only,
+        hide_tools=[str(t) for t in hide_tools],
         usecase_prefix=raw.get("usecase_prefix"),
         path=bundle_dir,
     )

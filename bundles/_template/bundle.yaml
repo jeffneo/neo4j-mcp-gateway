@@ -9,9 +9,10 @@ instructions: >
   TODO: describe the graph this bundle analyses and what the usecase_ tools do,
   so an assistant can choose the right tool from a plain-language question.
 
-# Optional: pin this bundle to a specific Neo4j database on the shared instance.
-# Omit to inherit NEO4J_DATABASE from the root/bundle .env.
-# database: {{BUNDLE_NAME}}
-
 downstream:
-  read_only: false   # set true to hide the downstream write-cypher tool
+  read_only: false        # set true to hide the downstream write-cypher tool
+  # hide: [read-cypher]   # hide specific proxied tools from clients entirely
+
+# Connection (URI/user/password/database) is NEVER set here — it comes from env:
+# the root .env, overridden by an optional git-ignored .env in this folder. That
+# lets this bundle target its own Neo4j instance without secrets in committed YAML.

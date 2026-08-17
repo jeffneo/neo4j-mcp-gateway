@@ -23,7 +23,9 @@ from fastmcp import FastMCP
 
 from .bundles import list_bundles
 from .config import BUNDLES_DIR, Config
+from .middleware import HideToolsMiddleware
 from .proxy import build_downstream_proxy
+from .pytools import load_pytools
 from .yaml_tools import Neo4jExecutor, ToolSpecError, register_yaml_tools
 
 
@@ -38,27 +40,40 @@ def build_gateway(config: Config | None = None) -> FastMCP:
 
     _log(f"active bundle: {config.active_bundle}  ({config.bundle.description or 'no description'})")
 
-    gateway = FastMCP(name=config.server_name, instructions=config.instructions)
+    # Hide any proxied downstream tools the bundle marks off-limits (e.g. the IAM
+    # bundle hides raw 'read-cypher', which would bypass secure-read-cypher).
+    middleware = [HideToolsMiddleware(config.hide_tools)] if config.hide_tools else []
+    gateway = FastMCP(name=config.server_name, instructions=config.instructions, middleware=middleware)
 
     # 1) Proxy the official downstream server and mount its tools unchanged.
     _log(f"downstream command: {config.downstream_cmd}  (database: {config.neo4j_database})")
     proxy = build_downstream_proxy(config)
     gateway.mount(proxy)
     _log("mounted official Neo4j MCP tools (get-schema, read-cypher, write-cypher, list-gds-procedures)")
+    if config.hide_tools:
+        _log(f"hiding proxied tool(s): {', '.join(config.hide_tools)}")
 
-    # 2) Discover + register YAML use-case tools.
     executor = Neo4jExecutor(config)
     atexit.register(executor.close)
+
+    # 2) Discover + register YAML use-case tools.
     try:
         names = register_yaml_tools(gateway, config, executor)
     except ToolSpecError as exc:
         _log(f"ERROR loading YAML tools: {exc}")
         raise
-
     if names:
-        _log(f"registered {len(names)} YAML use-case tool(s) from {config.tools_dir}: {', '.join(names)}")
+        _log(f"registered {len(names)} YAML tool(s) from {config.tools_dir}: {', '.join(names)}")
     else:
-        _log(f"no YAML use-case tools found in {config.tools_dir}")
+        _log(f"no YAML tools in {config.tools_dir}")
+
+    # 3) Register code-backed (Python) tools, if the bundle ships any.
+    pytools = load_pytools(config, executor)
+    for tool in pytools:
+        gateway.add_tool(tool)
+    if pytools:
+        _log(f"registered {len(pytools)} code tool(s) from {config.pytools_dir}: "
+             f"{', '.join(t.name for t in pytools)}")
 
     return gateway
 

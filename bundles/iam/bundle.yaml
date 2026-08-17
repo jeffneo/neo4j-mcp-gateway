@@ -1,22 +1,28 @@
-# Identity & Access Management (IAM) bundle — SKELETON.
+# Identity & Access Management (IAM) bundle — query-mediation pattern.
 # Select with:  ACTIVE_BUNDLE=iam
+#
+# Adapted from the IAM-aware Neo4j MCP fork: SSO identifies the user, the graph
+# resolves the user's effective groups, and secure-read-cypher composes an
+# authorization wrapper around a generated Cypher fragment before Neo4j runs it.
 name: neo4j-iam-gateway
-description: Identity & Access Management — entitlements, access risk, and blast radius.
+description: IAM-aware graph access — resolve identity and run IAM-filtered reads.
 
 instructions: >
-  This gateway analyses an IDENTITY & ACCESS MANAGEMENT graph. Entities include
-  User, Group, Role, Permission, and Resource, connected by MEMBER_OF (User->Group),
-  GRANTS (Group->Role), HAS_ROLE (User->Role, direct), ALLOWS (Role->Permission),
-  ON (Permission->Resource), and CONFLICTS_WITH (Role<->Role, segregation-of-duty
-  pairs). Generic tools (get-schema, read-cypher, write-cypher) are proxied from the
-  official Neo4j MCP server. Curated tools (prefixed 'usecase_') compute a user's
-  effective access, find segregation-of-duty violations, and trace privilege paths
-  to sensitive resources. Prefer traversals over assumptions about labels.
+  This gateway enforces graph-level access control. Permissions are stored as
+  list-valued properties on domain nodes, e.g. a (:Job) with `Permissions.Read`,
+  `Permissions.Create`, `Permissions.Update`, `Permissions.Delete`. A user's
+  effective principals are their username, 'everyone', their AdGroupList, and any
+  groups reachable via MEMBER_OF. WORKFLOW: (1) call resolve-identity first to
+  confirm the principal and its IAM groups; (2) for every data question call
+  secure-read-cypher, passing a read-only MATCH fragment WITHOUT a RETURN, the
+  protectedVariables to authorize (e.g. ["j"]), and a finalReturn for any
+  projection/aggregate. Raw read-cypher is intentionally unavailable because it
+  would bypass the IAM filter — do not attempt writes or unrestricted queries.
 
-# To pin IAM to its own database on the shared instance (Neo4j Enterprise
-# multi-db), uncomment. Left off here so the skeleton runs on any single-db
-# instance; bundle.yaml 'database' takes precedence over NEO4J_DATABASE when set.
-# database: iam
+# Connection is env-only (root .env, overridden by a git-ignored bundles/iam/.env).
+# IAM often lives on its own instance — drop a .env here with NEO4J_URI/USERNAME/
+# PASSWORD/DATABASE to point this bundle there. See .env.example.
 
 downstream:
-  read_only: false
+  read_only: true          # hide the downstream write-cypher tool
+  hide: [read-cypher]      # hide raw read-cypher — secure-read-cypher replaces it

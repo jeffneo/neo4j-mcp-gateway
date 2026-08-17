@@ -17,9 +17,8 @@ instructions: >
   history. Reason from behaviour in the graph — never rely on a field that merely
   labels something as fraud.
 
-# Optional: this bundle inherits the Neo4j connection from the root .env.
-# To pin it to a specific database on the same instance, uncomment:
-# database: ato
+# Connection comes from env only: root .env, overridden by a git-ignored
+# bundles/ato/.env if you want this bundle on its own Neo4j instance/database.
 
 # Downstream official server: allow write-cypher (set true to lock the demo down).
 downstream:

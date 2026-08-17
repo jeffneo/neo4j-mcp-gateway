@@ -7,10 +7,14 @@ A **bundle** (see :mod:`gateway.bundles`) is a swappable folder under
 ``bundles/`` that supplies the tools, demo data, docs, and non-secret config for
 one use case. ``ACTIVE_BUNDLE`` (or ``--bundle``) selects it.
 
-Resolution order:
+Connection resolution (URI / username / password / database):
   1. root ``.env``            — shared defaults / credentials
-  2. bundle ``.env``          — per-bundle overrides (wins over root)
-  3. ``bundle.yaml``          — declares database / instructions / prefix / read-only
+  2. bundle ``.env``          — per-bundle overrides (wins over root; git-ignored)
+
+Credentials and the database name are **never** read from ``bundle.yaml`` — a
+bundle can point at an entirely separate Neo4j instance purely via its ``.env``.
+``bundle.yaml`` carries only non-secret metadata (instructions, prefix,
+read-only, hidden tools).
 
 The same Neo4j credentials feed *both* the official downstream MCP server and
 the YAML tool executor (the ``neo4j`` Python driver).
@@ -72,10 +76,14 @@ class Config:
     downstream_cmd: str
     downstream_extra_env: dict[str, str] = field(default_factory=dict)
 
-    # --- YAML use-case tools ---
+    # --- Bundle tools (YAML) + code-backed tools (Python) ---
     tools_dir: Path = BUNDLES_DIR / DEFAULT_BUNDLE / "tools"
+    pytools_dir: Path = BUNDLES_DIR / DEFAULT_BUNDLE / "pytools"
     data_dir: Path = BUNDLES_DIR / DEFAULT_BUNDLE / "data"
     usecase_prefix: str = "usecase_"
+
+    # Proxied downstream tools to hide from clients (e.g. ['read-cypher']).
+    hide_tools: list[str] = field(default_factory=list)
 
     # --- Server identity (model-facing) ---
     server_name: str = "neo4j-mcp-gateway"
@@ -140,8 +148,8 @@ class Config:
             if val:
                 extra_env[name] = val
 
-        # Database precedence: bundle.yaml declaration wins, else env, else 'neo4j'.
-        database = manifest.database or _env("NEO4J_DATABASE", "neo4j")
+        # Connection is env-only (root .env, then bundle .env override).
+        database = _env("NEO4J_DATABASE", "neo4j")
 
         # Tools default to the bundle's tools/, but TOOLS_DIR can override (handy
         # for pointing the dev loop at a reference/answers folder).
@@ -164,8 +172,10 @@ class Config:
             downstream_cmd=_env("NEO4J_MCP_CMD", "uvx neo4j-mcp-server"),
             downstream_extra_env=extra_env,
             tools_dir=tools_dir,
+            pytools_dir=bundle_dir / "pytools",
             data_dir=bundle_dir / "data",
             usecase_prefix=os.getenv("USECASE_PREFIX") or manifest.usecase_prefix or "usecase_",
+            hide_tools=list(manifest.hide_tools or []),
             server_name=os.getenv("GATEWAY_NAME") or manifest.name or "neo4j-mcp-gateway",
             instructions=manifest.instructions or default_instructions,
         )
