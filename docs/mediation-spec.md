@@ -298,10 +298,39 @@ attempt to call a hidden tool is recorded as a rejection rather than vanishing.
 path configured — running unaudited becomes a recorded decision, matching how
 `security.mode` treats running unfiltered.
 
-**Not included, and worth saying so in a review:** the log is append-only by
-convention, not tamper-evident. There is no hash chain and no signature. A
-deployment that needs those should ship lines to a WORM store or a SIEM at write
-time; this file is the source, not the control.
+### Tamper evidence
+
+Records are hash-chained: each carries `seq`, `prev` (the previous record's hash)
+and its own `hash` over the canonical serialisation of everything else.
+[`scripts/verify_audit.py`](../scripts/verify_audit.py) recomputes the chain and
+names the first line that breaks it.
+
+Be precise about what that buys, because "immutable audit log" is a phrase a
+reviewer will press on:
+
+| | |
+| --- | --- |
+| **Detected** | a line edited in place; a line removed from the middle; lines reordered or inserted |
+| **Not detected** | truncating the whole file and starting fresh — the new chain is internally valid, and a genesis record is indistinguishable from a log never written |
+| **Not prevented** | anything. Write access plus the code is enough to recompute the chain forward from any change |
+
+Both gaps close the same way and only the same way: **get the head hash out of
+reach of whoever can write the file.** `NEO4J_MCP_AUDIT_FORWARDER` periodically
+publishes `(seq, head)` to a destination the gateway host cannot rewrite, and
+`verify_audit.py --checkpoints` compares them. A checkpoint whose seq is past the
+end of the file is proof of truncation; a head that disagrees is proof of
+rewriting.
+
+Demonstrated: after emptying the log and letting the gateway start a new chain,
+verification alone reports **PASSED**; verification against the anchors reports
+`checkpoint seq 6 is past the end of the log (last is 1) — 5 record(s) are
+MISSING`. The forwarder is not decoration.
+
+Two forwarders ship — `stderr` and `file:<path>` — and neither is a real anchor
+on the same host. That is the seam: a deployment registers its own SIEM, WORM
+bucket or signing service with `gateway.audit.register_forwarder()`, a one-method
+contract. The gateway logs a warning at startup when no forwarder is configured,
+and refuses to start on an unknown one.
 
 ## 5c. Downstream identity
 

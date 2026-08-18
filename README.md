@@ -212,6 +212,20 @@ A bundle can declare `security.require_audit: true`, and the gateway then
 **refuses to start** without a log path — the same fail-closed stance as
 `security.mode`.
 
+**Records are hash-chained** (`seq`, `prev`, `hash`), so editing, deleting or
+reordering a line is detectable:
+
+```bash
+uv run python scripts/verify_audit.py audit.jsonl --checkpoints checkpoints.jsonl
+```
+
+A chain proves tampering *only if its head exists somewhere the log's writer
+cannot rewrite* — otherwise the file can be truncated and restarted and will
+verify clean. `NEO4J_MCP_AUDIT_FORWARDER` publishes `(seq, head)` periodically to
+such a place. `stderr` and `file:<path>` ship for development; a deployment
+registers its SIEM or WORM sink with `gateway.audit.register_forwarder()` — a
+one-method contract. Startup warns when nothing anchors the chain.
+
 ### Where identity lives
 
 By default the identity graph sits beside the data and the prelude traverses it

@@ -24,7 +24,7 @@ from fastmcp import FastMCP
 from .bundles import list_bundles
 from .config import BUNDLES_DIR, Config, resolve_configs
 from .audit import (ENV_PATH, AuditMiddleware, AuditSink, audit_path,
-                    include_arguments)
+                    build_forwarder, checkpoint_every, include_arguments)
 from .middleware import HideToolsMiddleware
 from .proxy import build_downstream_proxy
 from .pytools import load_pytools
@@ -85,8 +85,18 @@ def _audit_middleware(configs: list[Config]) -> list:
     if not path:
         return []
     args = include_arguments(env)
+    forwarder = build_forwarder(env)
+    every = checkpoint_every(env)
+    sink = AuditSink(path, forwarder=forwarder, checkpoint_every=every)
+    atexit.register(sink.close)
     _log(f"audit log: {path}" + ("  (including argument values)" if args else ""))
-    return [AuditMiddleware(AuditSink(path), configs, log_arguments=args)]
+    if forwarder is None:
+        _log("  WARNING: no NEO4J_MCP_AUDIT_FORWARDER — records are hash-chained, but "
+             "nothing anchors the chain head off this host, so wholesale truncation "
+             "and rewriting stay undetectable")
+    else:
+        _log(f"  chain checkpoints every {every} records -> {type(forwarder).__name__}")
+    return [AuditMiddleware(sink, configs, log_arguments=args)]
 
 
 def _compose_instructions(configs: list[Config]) -> str:
