@@ -5,7 +5,7 @@
 # proving he cannot read a colleague's private chat is the requirement.
 #
 # Run:  uv run python scripts/check_entitlements.py iam
-# Exits non-zero on any failure, so it belongs in CI and in the eval evidence pack.
+# Exits non-zero on any failure, so it can gate CI and serve as review evidence.
 
 cases:
   # ---------------------------------------------------------------------------
