@@ -1,6 +1,7 @@
 # Design: path-based grants
 
-Status: **proposed**. Nothing here is implemented yet.
+Status: **proposed**, with the load-bearing assumptions validated by spike (§5).
+Nothing here is implemented yet.
 
 Today a row is readable when its `Permissions.Read` list intersects the caller's
 principals. That is a *materialised* grant: some upstream process must write the
@@ -149,32 +150,73 @@ explain-access(resource: "TRD-3001")
 Cheap to build once grants are declarative, and it is the demo moment that an
 audit or control-room audience reacts to.
 
-## 5. Risks and what to validate first
+## 5. Spike results
 
-Three assumptions carry the design. I would spike them against the 100k dataset
-**before** building the feature, because a negative result changes the shape:
+Measured on 100,000 trades where the caller is entitled to 1,000. All four
+variants return the identical answer (1,000 trades / 1,000 clients).
 
-1. **`EXISTS { }` in filter position performs as a semi-apply** with both
-   endpoints bound — i.e. it short-circuits per row rather than materialising.
-   If it does not, path grants may be slower than ACLs on the filter path, and
-   `both` mode becomes the default recommendation rather than a migration step.
-2. **The anchored composition actually delivers the win** through a `CALL`
-   subquery boundary. The 38× was measured on a hand-written query; the engine's
-   composition adds a subquery the planner may treat differently.
-3. **Label dispatch is expressible** without an unmanageable predicate when a
-   bundle declares grants for many labels.
+| Composition | p50 | db hits |
+| --- | --- | --- |
+| scan + ACL filter *(today)* | 107.8 ms | 506,508 |
+| scan + path filter | 185.3 ms | 2,501,499 |
+| **anchored + ACL filter** | **5.5 ms** | **13,530** |
+| **anchored + path filter** | **9.3 ms** | **28,521** |
 
-Secondary risks worth stating: grant patterns are interpolated into Cypher, so
-they are author-trusted config at the same level as a tool's own query (never
-caller input); and variable-length grant patterns could be expensive per row,
-so the reference should recommend bounded patterns.
+**1. `EXISTS { }` short-circuits, but path filtering is more expensive than ACL
+filtering.** The plan shows `SelectOrSemiApply` with a `Limit`, confirming it
+stops at the first match rather than materialising. But a traversal per row costs
+more than a list-membership test: 2.8× the db hits for one grant, and each
+additional grant adds more. **This is the design's most important negative
+result** — path grants must never be sold as a filter-path optimisation. Their
+value is no materialisation, no staleness, and provenance. All of the performance
+comes from anchoring, which is exactly why §1 separates them.
+
+**2. Anchoring survives the composition boundary.** The engine-shaped form —
+prelude subquery, engine-emitted anchor, the tool's match in a `CALL { }` with the
+anchored variable passed in — reaches 5.5 ms / 13,530 hits against 107.8 ms /
+506,508 today: **20× faster, 37× fewer db hits**, and within 2× of hand-written
+Cypher (3.6 ms / 7,025). The planner pushes through the subquery boundary.
+
+Retaining the entitlement filter on top of the anchor — the safety property that
+a wrong anchor costs speed but never correctness — costs about 2.4 ms and 2,000
+db hits on an already-20×-faster query. That is cheap insurance, and it means the
+guarantee never rests on the author declaring the anchor correctly.
+
+**3. Label dispatch is free.** Db hits were identical (25,549) whether the filter
+carried 2, 6, or 12 grant clauses; wall-clock moved from 9.1 ms to 10.2 ms across
+that range. The `NOT var:Label` guard short-circuits before the traversal, so a
+bundle may declare grants for many record types without penalty on queries that
+touch few.
+
+### Consequences for the design
+
+- Path grants ship for their **semantics**, not their speed. A bundle that adopts
+  `path` without an anchor should expect to be slower than ACLs — the reference
+  must say so plainly.
+- `both` mode is more valuable than first thought: it lets a bundle keep ACL
+  filtering (cheaper) while deriving grants for correctness and provenance.
+- Anchoring is where the investment pays, and it is independent of grant model —
+  **anchored + ACL is the fastest combination measured**. It should therefore be
+  built first, and can ship before path grants entirely.
+
+Secondary risks: grant patterns are interpolated into Cypher, so they are
+author-trusted config at the same level as a tool's own query (never caller
+input); and variable-length grant patterns are expensive per row, so the
+reference should recommend bounded patterns.
 
 ## 6. Scope
 
-**Build now:** `grant_model` config, path filter semantics, `both` mode,
-differential validation in the conformance harness.
+Revised by the spike results — anchoring moves first, because it is where the
+performance is and it is independent of the grant model.
 
-**Build next, once grants are declarative:** `explain-access`, anchoring.
+**Build first:** anchoring (`anchor:` on a mediated tool), which delivers 20×
+against today's composition regardless of how grants are expressed.
+
+**Build next:** `grant_model` config, path filter semantics, `both` mode, and
+differential validation in the conformance harness — for materialisation,
+staleness and provenance rather than speed.
+
+**Build after that:** `explain-access`, which needs declarative grants.
 
 **Not building:** automatic anchor inference from an arbitrary query; grant
 patterns over relationships rather than nodes; write-side grants.
