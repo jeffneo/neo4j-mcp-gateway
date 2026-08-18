@@ -58,6 +58,14 @@ security:
       via: "(caller)-[:PARTICIPANT_IN]->(resource)"
       reason: "was a participant in the conversation"
 
+  # Which property identifies a row of each governed label. explain-access uses
+  # this to find the record a question is about.
+  resource_keys:
+    Trade: tradeId
+    Communication: commId
+    Request: requestId
+    Deal: dealId
+
 downstream:
   read_only: true   # official server never registers write-cypher
   # NOTE: raw read-cypher is hidden AUTOMATICALLY because security.mode is

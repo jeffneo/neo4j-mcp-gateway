@@ -117,6 +117,9 @@ class SecurityPolicy:
     #              paths, and most real models contain some of each.
     grant_model: str = GRANT_PROPERTY
     grants: list[Grant] = field(default_factory=list)
+    # Label -> the property that identifies one of its rows, e.g. {Trade: tradeId}.
+    # Used by explain-access to find the row a question is about.
+    resource_keys: dict[str, str] = field(default_factory=dict)
     expose_open_query_tool: bool = True
     # Keep the proxied raw read-cypher despite mediation. Defeats the guarantee;
     # requires an explicit opt-in and is logged loudly.
@@ -235,10 +238,19 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
     if grant_model in (GRANT_PATH, GRANT_BOTH) and not grants:
         raise ValueError(f"{f}: security.grant_model={grant_model!r} requires at least one grant")
 
+    raw_keys = sec_raw.get("resource_keys") or {}
+    if not isinstance(raw_keys, dict):
+        raise ValueError(f"{f}: security.resource_keys must be a mapping of label -> property")
+    resource_keys = {str(k): str(v) for k, v in raw_keys.items()}
+    for label, prop in resource_keys.items():
+        if not label.replace("_", "").isalnum() or not prop.replace("_", "").isalnum():
+            raise ValueError(f"{f}: security.resource_keys has invalid entry {label!r}: {prop!r}")
+
     security = SecurityPolicy(
         mode=mode,
         grant_model=grant_model,
         grants=grants,
+        resource_keys=resource_keys,
         permissions_property=str(sec_raw.get("permissions_property") or "Permissions.Read"),
         protected_labels=[str(x) for x in protected_labels],
         identity=identity,

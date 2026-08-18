@@ -39,9 +39,11 @@ P_MATCH_KEYS = "__secure_match_keys"
 P_GROUP_KEYS = "__secure_group_name_keys"
 P_INLINE_GROUPS = "__secure_inline_group_prop"
 P_EVERYONE = "__secure_everyone"
+P_DISPLAY_KEYS = "__secure_display_keys"
+P_RESOURCE_ID = "__secure_resource_id"
 RESERVED_PARAMS = (
     P_PRINCIPAL, P_PERM_PROP, P_ID_LABELS, P_MATCH_KEYS,
-    P_GROUP_KEYS, P_INLINE_GROUPS, P_EVERYONE,
+    P_GROUP_KEYS, P_INLINE_GROUPS, P_EVERYONE, P_DISPLAY_KEYS, P_RESOURCE_ID,
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -242,6 +244,13 @@ def security_params(policy: SecurityPolicy, principal: str) -> dict[str, object]
         P_GROUP_KEYS: policy.identity.group_name_keys,
         P_INLINE_GROUPS: policy.identity.inline_group_list,
         P_EVERYONE: policy.principal.everyone,
+        # Property names tried, in order, when naming a node in an explanation.
+        P_DISPLAY_KEYS: list(dict.fromkeys(
+            list(policy.resource_keys.values())
+            + policy.identity.group_name_keys
+            + policy.identity.match_keys
+            + ["name", "title", "codename", "subject"]
+        )),
     }
 
 
@@ -399,3 +408,60 @@ def prelude_only_query(policy: SecurityPolicy) -> str:
     constant overhead from the filter, which scales with rows examined.
     """
     return _subst(_PRELUDE, policy) + "\nRETURN authz.authzPrincipals AS principals"
+
+
+# --------------------------------------------------------------------------- #
+# Access explanation
+# --------------------------------------------------------------------------- #
+#
+# EXPLANATION_SAFETY
+# ------------------
+# An explanation is itself a disclosure channel. Saying "you are not entitled to
+# TRD-3001" confirms TRD-3001 exists, which a bare "not found" would not. The
+# tool therefore collapses "no such row" and "row exists but you may not read it"
+# into one indistinguishable answer. That costs some debuggability and is the
+# right trade: a caller learns why they CAN see something, never that something
+# they cannot see is there.
+
+def explain_query(policy: SecurityPolicy, label: str, key_property: str) -> str:
+    """Find one row and report which declared grants reach it from the caller.
+
+    Returns one row per grant with whether it matched and the matching path, plus
+    the ACL intersection for the property model. Callers must treat a `found`
+    of false as "no answer", never as "does not exist" (see EXPLANATION_SAFETY).
+    """
+    # Each UNION arm is independent and must import the variables it uses.
+    # OPTIONAL MATCH keeps one row per grant whether or not it matched, so a
+    # resource with no matching grant still yields a row to report on.
+    arms = [
+        f"  WITH caller, resource\n"
+        f"  OPTIONAL MATCH grantPath = {_bind(grant.via, 'resource')}\n"
+        f"  RETURN {i} AS idx, grantPath AS p LIMIT 1"
+        for i, grant in enumerate(policy.grants) if grant.label == label
+    ]
+
+    if arms:
+        collect = ("CALL {\n" + "\n  UNION\n".join(arms) + "\n}\n"
+                   "WITH caller, authz, resource, collect({idx: idx, path: p}) AS grants")
+        matched = """[g IN grants WHERE g.path IS NOT NULL | {
+     idx: g.idx,
+     nodes: [n IN nodes(g.path) | {
+       labels: labels(n),
+       name: head([k IN $@@P_DISPLAY_KEYS@@ WHERE n[k] IS NOT NULL | toString(n[k])])
+     }],
+     rels: [r IN relationships(g.path) | type(r)]
+  }]"""
+    else:
+        collect = "WITH caller, authz, resource"
+        matched = "[]"
+
+    return _subst(f"""{_PRELUDE}
+MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
+WITH caller, authz, resource
+{collect}
+RETURN
+  {matched} AS matched,
+  [x IN coalesce(resource[$@@P_PERM_PROP@@], [])
+     WHERE x IN authz.authzPrincipals] AS aclMatches,
+  authz.authzPrincipals AS principals""".replace(
+        "@@P_DISPLAY_KEYS@@", P_DISPLAY_KEYS), policy)

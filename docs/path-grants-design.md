@@ -321,7 +321,31 @@ Two things the implementation established that the design had wrong or unstated:
   `resource`, and that rule is enforced at load — a "grant" that ignores the row
   is a role rule and belongs in the property model.
 
-**Build after that:** `explain-access`, which needs declarative grants.
+**Built.** `explain-access` answers "why can I see this?" by naming the grant
+that matched and rendering the path that satisfies it:
+
+```
+anna.ross -> TRD-3001   [GRANTED]
+  because: booked the trade
+  path:    (User:Anna Ross)-[:BOOKED]-(Trade:TRD-3001)
+  because: covers the client the trade was booked for
+  path:    (User:Anna Ross)-[:MEMBER_OF]-(AdGroup:coverage-acme)
+           -[:COVERED_BY]-(Client:Acme Corp)-[:FOR_CLIENT]-(Trade:TRD-3001)
+```
+
+It also reports role-based access honestly — a desk user reaches the same trade
+with no path at all, and the answer says so, quoting the matched ACL entry
+instead. That contrast is the clearest demonstration of why `both` exists.
+
+**An explanation is itself a disclosure channel.** Saying "you are not entitled
+to TRD-3001" confirms TRD-3001 exists, where a bare "not found" would not. The
+tool therefore returns an identical answer whether the row is absent or merely
+unreadable. That costs some debuggability and is the right trade: a caller may
+learn why they *can* see something, never that something they cannot see exists.
+Documented as `EXPLANATION_SAFETY` in `gateway/mediation.py`.
+
+Requires `security.resource_keys` (label to identifying property) so the tool can
+find the record a question is about; it registers only when that is declared.
 
 **Not building:** automatic anchor inference from an arbitrary query; grant
 patterns over relationships rather than nodes; write-side grants.
