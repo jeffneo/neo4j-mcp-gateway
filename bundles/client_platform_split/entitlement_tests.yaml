@@ -3,9 +3,14 @@
 #
 #   ACTIVE_BUNDLE=client_platform_split uv run python scripts/check_entitlements.py
 #
-# The first three sections assert that separation costs nothing that the ACL
-# model already expressed. The last section asserts what it DOES cost, so the
-# loss is a tested fact rather than something discovered in front of a customer.
+# Every case here has a counterpart in the co-located client_platform bundle and
+# must return the SAME rows for the SAME caller. The grant patterns are authored
+# identically; the engine cuts each one at the identity/data boundary and
+# re-roots the data-side half at a proxy node.
+#
+# The last section is the one that matters: path grants survive the split. If the
+# cut ever regresses it denies rather than leaks — a false negative, which is the
+# error direction nobody notices — so those cases name exact records.
 
 cases:
   # --- Coverage-derived access, via materialised ACLs -------------------------
@@ -83,25 +88,42 @@ cases:
     return: "RETURN x.code AS id"
     id_field: id
 
-  # --- WHAT SEPARATION COSTS --------------------------------------------------
-  # In the co-located bundle nadia reads INT-2006 because she logged it — a path
-  # from the caller, which no ACL entry expresses. With identity in another
-  # database that path cannot be walked, so the same person loses the same
-  # record. This case asserts the loss deliberately: it is the price of
-  # separation, and it should fail loudly if anyone believes otherwise.
-  - name: authorship access is LOST when identity is separated
+  # --- THE POINT: path grants survive the split ------------------------------
+  # nadia reads INT-2006 because she LOGGED it — a traversal from the caller that
+  # no ACL entry expresses. The grant is authored identically to the co-located
+  # bundle; the engine cuts it at the identity/data boundary and re-roots the
+  # data-side half at the User proxy. If the cut ever regresses this denies
+  # silently, which is why the case names the exact record.
+  - name: authorship reaches a record no ACL entry grants
     principal: nadia.haddad@bank.com
     match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Kestrel Capital'})"
     scope: [x]
     return: "RETURN x.interactionId AS id"
     id_field: id
-    must_not_see: [INT-2006, INT-2003]
-    expect_count: 0
+    must_see: [INT-2006]
+    must_not_see: [INT-2003]
 
-  - name: the covering team still sees both, because that route is an ACL entry
+  - name: the covering team reaches both, through the group proxy
     principal: sofia.rossi@bank.com
     match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Kestrel Capital'})"
     scope: [x]
     return: "RETURN x.interactionId AS id"
     id_field: id
     must_see: [INT-2003, INT-2006]
+
+  - name: a caller with neither route sees nothing
+    principal: evan.brooks@bank.com
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Kestrel Capital'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+    must_not_see: [INT-2003, INT-2006]
+    expect_count: 0
+
+  # Derived (split path) vs materialised ACL, on the same question. Divergence
+  # here means the cut changed which rows are entitled.
+  - name: split path grants agree with materialised ACLs
+    differential: true
+    principals: [lena.fischer@bank.com, evan.brooks@bank.com, sofia.rossi@bank.com]
+    tool: client_opportunities
+    id_field: product

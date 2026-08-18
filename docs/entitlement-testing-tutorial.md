@@ -37,7 +37,7 @@ relationship. That is what makes the separated topologies below possible, so loa
 | **B** | one graph, distinct subgraphs joined at defined seams | 1 | ✅ | ✅ |
 | **C** | two business domains, **each with its own copy of identity** | 2 | ✅ | ✅ |
 | **D** | identity in one database, the data in another, **naively** | 2 | ❌ | — |
-| **E** | same split, joined by a **composite database** | 1–2 | ✅ | ⚠️ possible, engine not there yet |
+| **E** | same split, joined by a **composite database** | 1–2 | ✅ | ✅ via proxy nodes |
 | **F** | same split, identity resolved over a **second connection** | 2 | ✅ | ❌ |
 
 A and B are the same physically and differ in modelling discipline; B is what you
@@ -45,10 +45,9 @@ would actually govern. C is the multi-bundle setup.
 
 **D, E and F are the same physical arrangement with three different answers.**
 D is what happens if you split identity from data and change nothing else — it
-fails. E and F are the two supported ways to make that split work. F genuinely
-gives up path grants and anchoring. E does **not have to** — see
-[what E can recover](#what-e-can-recover-proxy-nodes) — though the engine does
-not yet compose the query that way. Read D first; it explains why.
+fails. E and F are the two supported ways to make that split work. **E keeps path
+grants** by cutting each traversal at a node present in both databases; F gives
+them up. Read D first; it explains why.
 
 ### C and D are not "one instance vs two" — read this before skipping
 
@@ -88,7 +87,7 @@ one arrangement that does not work on its own. The fix is **replication** (C), o
 declaring a separated identity source so the engine composes the query
 differently (**E** and **F**). Note that E's split still requires replicating the
 *seam nodes* into the data constituent — see
-[what E can recover](#what-e-can-recover-proxy-nodes) — so "no duplication" is
+[how E keeps path grants](#how-e-keeps-path-grants-proxy-nodes) — so "no duplication" is
 never actually on the menu.
 
 ---
@@ -326,16 +325,16 @@ Both give up the caller **node** in the data query:
 | Aggregates computed after filtering | ✅ | ✅ |
 | Curated-only posture, harness, `explain-access` | ✅ | ✅ |
 | One statement, one transaction | ✅ | ❌ two round trips, consistency window |
-| **Path grants** | ⚠️ possible via proxy nodes — engine not there yet | ❌ genuinely unavailable |
-| **Anchoring** | ⚠️ same | ❌ |
+| **Path grants** | ✅ kept, via proxy nodes | ❌ `grant_model: property` only |
+| **Anchoring** | ❌ | ❌ |
 | Tools scoping to `caller` | ❌ must use a parameter | ❌ |
+| Extra requirement | proxy nodes in the data constituent | none |
 
-The engine **refuses to start** rather than degrading quietly: a bundle declaring
-a separated source with path grants, an anchor, or a tool referencing `caller`
-fails at load with a message saying why. For composite that restriction is
-currently stricter than the database requires.
+The engine **refuses to start** rather than degrading quietly: an anchor, a tool
+referencing `caller`, path grants under `remote`, or a grant that cannot be cut
+safely all fail at load with a message saying why.
 
-### What E can recover: proxy nodes
+### How E keeps path grants: proxy nodes
 
 A *relationship* cannot span two graphs. A *traversal* can still be split at a
 node that exists in both — the documented
@@ -351,49 +350,54 @@ Our grant already passes through such a node:
                         ^ AdGroup exists in BOTH; the group NAME crosses as a value
 ```
 
-Verified working on 2025.10.1 — a real query-time traversal in the data
-constituent, not a materialised ACL:
+**You author the grant once.** `client_platform_split` declares the same four
+grants, in the same words, as the co-located bundle. The engine finds the cut by
+walking from `caller` and consuming the leading run of identity relationships
+(`identity.group_rels`), then re-roots the data-side half at the proxy:
 
 ```cypher
-CALL { USE fed.identity
-       MATCH (u:User {email:$p})-[:MEMBER_OF*1..]->(g:AdGroup)
-       RETURN collect(DISTINCT g.name) AS groups }
-CALL { USE fed.data
-       WITH groups
-       MATCH (o:Opportunity)
-       WHERE EXISTS { MATCH (o)-[:FOR_CLIENT]->(:Client)-[:COVERED_BY]->(g2:AdGroup)
-                      WHERE g2.name IN groups }
-       RETURN o }
-RETURN collect(o.id), sum(o.value);
+-- authored
+(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)
+-- emitted, inside USE fed.data
+EXISTS { MATCH (cut:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(o)
+         WHERE any(k IN $groupKeys WHERE cut[k] IN authz.authzPrincipals) }
 ```
 
-```
-lena.fischer   ["OPP-1","OPP-3"]  520000.0
-evan.brooks    ["OPP-2"]          120000.0
-nadia.haddad   []                 0
-```
+A grant with no group hop cuts at the caller instead, which is how authorship
+survives — `(caller)-[:LOGGED]->(resource)` becomes a match on the `User` proxy
+by `principalId`.
 
-Caller-direct grants work the same way through a `User` proxy holding only the
-email (`EXISTS { MATCH (:User {email: callerId})-[:LOGGED]->(i) }`), and so does
-anchoring — traverse *from* the group node inward rather than scanning.
-
-**What it costs is replication surface.** Every node a grant passes through needs
-a proxy in the data constituent, and the data-side relationships must live there:
-`AdGroup` stubs plus `COVERED_BY`, `User` stubs plus `LOGGED`. What stays behind
-in the identity database is people, groups and `MEMBER_OF` — which is the
-high-churn part, the part that changes when someone moves desks. Arguably a
-sound division: *who covers this client* is a fact about the client.
-
-**Why the engine doesn't do this yet.** The filter would have to move inside the
-`USE` block. The outer composite query rejects every graph access —
+**The filter runs inside the `USE` block** for this source, because the outer
+composite query rejects every graph access:
 
 ```
 42NA1: Graph access operations are not supported on composite databases.
-42NA0: Query contains operations that must be executed on the constituent.
 ```
 
-— while property reads on exported entities are allowed, which is exactly why
-today's outer-query filter works for the property model and only for it.
+Filtering there is also strictly better — rows are discarded before they cross
+the boundary.
+
+**What it costs is replication surface.** Every node a grant passes through needs
+a proxy in the data constituent, and the data-side relationships must live there.
+[`data/proxies.cypher`](../bundles/client_platform_split/data/proxies.cypher)
+builds them from properties `platform.cypher` already wrote, so it needs nothing
+from the identity graph:
+
+| Identity constituent | Data constituent |
+| --- | --- |
+| `(:User)` full attributes | `(:User {email})` — proxy |
+| `(:AdGroup)` full attributes | `(:AdGroup {name})` — proxy |
+| `(:User)-[:MEMBER_OF]->(:AdGroup)` | `(:Client)-[:COVERED_BY]->(:AdGroup)` |
+| | `(:User)-[:LOGGED]->(:Interaction)` |
+
+Membership stays in identity — the high-churn half, the part that changes when
+someone moves desks. What replicates is coverage and authorship, which are facts
+*about* the business records.
+
+**The refusal that matters.** If an identity relationship appears *after* the
+boundary, the suffix would run where those edges do not exist, match nothing, and
+deny silently. False negatives are the error direction nobody notices, so the
+engine rejects such a grant at load rather than composing it.
 
 ---
 
@@ -403,9 +407,9 @@ Both use the **`client_platform_split`** bundle: the same client platform as
 above, with `grant_model: property` and the identity graph elsewhere. It ships
 configured for E; switching to F is two lines in `bundle.yaml`.
 
-Load the two halves into two databases. On self-managed Enterprise (or AuraDB
-Business Critical / Virtual Dedicated Cloud, which support several databases per
-instance):
+Load the halves into two databases — the data side also gets the proxy nodes. On
+self-managed Enterprise (or AuraDB Business Critical / Virtual Dedicated Cloud,
+which support several databases per instance):
 
 ```cypher
 CREATE DATABASE datadb WAIT;
@@ -414,11 +418,14 @@ CREATE DATABASE identitydb WAIT;
 
 ```bash
 cypher-shell -d datadb     -f bundles/client_platform/data/platform.cypher
+cypher-shell -d datadb     -f bundles/client_platform_split/data/proxies.cypher
 cypher-shell -d identitydb -f bundles/client_platform/data/identity.cypher
 ```
 
-`identity.cypher` finds no `Client` nodes in `identitydb` and creates no seams.
-That is expected here and is exactly the situation topology D failed on.
+`identity.cypher` finds no `Client` nodes in `identitydb` and creates no seams
+there — expected, and exactly the situation topology D failed on. The seams now
+live in `datadb`, built by `proxies.cypher` from properties `platform.cypher`
+already wrote.
 
 ### E — composite database
 
@@ -444,11 +451,11 @@ NEO4J_DATABASE=fed ACTIVE_BUNDLE=client_platform_split \
   uv run python scripts/check_entitlements.py
 ```
 
-Expect **11 passed, 0 failed**. The engine composes one statement: the prelude
-resolves the caller under `USE fed.identity`, the tool's match runs under
-`USE fed.data`, and the filter and final RETURN run in the composite query over
-what came back. **One statement, one transaction, two databases** — so unlike F
-there is no consistency window between resolving and reading.
+Expect **13 passed, 0 failed**. The engine composes one statement: the prelude
+resolves the caller under `USE fed.identity`, and the tool's match, the
+entitlement filter and the split path grants all run under `USE fed.data`.
+**One statement, one transaction, two databases** — so unlike F there is no
+consistency window between resolving and reading.
 
 ### F — a second connection
 
@@ -459,6 +466,11 @@ identity:
   source: remote
   remote_env_prefix: IDENTITY
 ```
+
+You must also set `grant_model: property` and remove the `grants:` block — a
+remote source has no proxy in the data database to re-root a traversal at, and
+the engine refuses to start otherwise. That is the concrete difference between
+E and F, enforced rather than documented.
 
 The identity connection comes from the environment, never from the manifest —
 same rule as every other connection here:
@@ -477,28 +489,28 @@ IDENTITY_NEO4J_DATABASE=neo4j
 ACTIVE_BUNDLE=client_platform_split uv run python scripts/check_entitlements.py
 ```
 
-Expect **11 passed, 0 failed** again — identical assertions, identical results,
-different architecture. This is the mode that makes the identity store genuinely
-independent: a different instance, a different region, its own credentials, its
-own lifecycle. It is also the extension point for an **external** entitlement
-service: implement `IdentitySource` in
+The ACL-derived cases pass; the authorship case fails, because without a
+traversal into the data constituent `nadia` loses `INT-2006`. That is the honest
+difference between E and F, and the reason to prefer E when you can run a
+composite database.
+
+What F buys instead is the most independent identity store available here — a
+different instance, a different region, its own credentials, its own lifecycle,
+and no proxy nodes to maintain. It is also the extension point for an
+**external** entitlement service: implement `IdentitySource` in
 [`gateway/identity_sources.py`](../gateway/identity_sources.py), register it, and
 the rest of the engine is unchanged.
 
-### The case that proves what you gave up
+### The case that proves the split is honest
 
-Two of the eleven cases are there specifically to record the loss:
+`INT-2006` is readable by `nadia.haddad` **only** because she logged it — a
+traversal from the caller that no ACL entry expresses. Three cases pin it down:
 
 ```
-PASS  authorship access is LOST when identity is separated
-PASS  the covering team still sees both, because that route is an ACL entry
+PASS  authorship reaches a record no ACL entry grants
+PASS  the covering team reaches both, through the group proxy
+PASS  a caller with neither route sees nothing
 ```
-
-In the co-located bundle, `nadia.haddad` reads `INT-2006` because she **logged**
-it — a path from the caller that no ACL entry expresses. Split identity out and
-that route cannot be walked, so she loses the record while her colleague on the
-covering team keeps it. The suite asserts the loss deliberately, so it is a
-tested fact rather than a surprise in front of an audience.
 
 Ask `explain-access` the same question under each bundle — change only
 `ACTIVE_BUNDLE` and the connection:
@@ -521,17 +533,18 @@ EOF
 ```
 
 ```
-client_platform         nadia    granted=True   ['logged this interaction']
-                        sofia    granted=True   ['covers the client ...']
+client_platform         nadia  granted=True   ['logged this interaction']
+                        sofia  granted=True   ['covers the client this interaction was with']
 
-client_platform_split   nadia    granted=False  []
-                        sofia    granted=True   []
+client_platform_split   nadia  granted=True   ['logged this interaction']
+                        sofia  granted=True   ['covers the client this interaction was with']
+                        evan   granted=False  []
 ```
 
-Nadia's route was a relationship. Split identity out and it is gone; Sofia's,
-which was a group name in a list, survives. **That single line is the clearest
-statement of what separation costs**, and it is why the co-located topologies are
-the recommendation whenever the identity graph can live beside the data.
+Identical answers, identical reasons, two different topologies. The suite goes
+further and compares whole result sets: **24 comparisons across three record
+types and eight callers, zero divergence.** The grant patterns are authored once
+and mean the same thing on either side of the split.
 
 ---
 
@@ -637,7 +650,7 @@ when someone leaves the desk.
 | Why can they see it? | `explain-access` snippet in topology A |
 | Do derived grants match the lists? | the `differential: true` case in `entitlement_tests.yaml` |
 | What does mediation cost? | `uv run python scripts/bench_mediation.py client_platform` |
-| What does separating identity cost? | run the same suite under `client_platform` and `client_platform_split` |
+| What does separating identity cost? | run the same suite under `client_platform` and `client_platform_split` — they should agree |
 | What do native controls cost? | `uv run python scripts/bench_native_controls.py` (Enterprise/Business Critical) |
 
 ## The cast

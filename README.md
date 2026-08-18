@@ -170,21 +170,29 @@ security:
 ```
 
 `composite` and `remote` make the identity store independent — its own instance,
-credentials and lifecycle, shareable across domains. Both give up the caller
-*node* in the data query, so both currently require `grant_model: property` and
-forbid anchoring and tools that reference `caller`. The engine **refuses to
-start** rather than degrading quietly.
+credentials and lifecycle, shareable across domains. Neither gives the data query
+a caller *node*, so both forbid anchoring and tools that reference `caller`.
 
-For `remote` that is inherent. For `composite` it is an **engine limitation, not
-a database one**: a relationship cannot span two graphs, but a traversal can be
-split at a node present in both — Neo4j's documented *proxy node* pattern — and
-path grants and anchoring both work that way. Supporting it means moving the
-filter inside the `USE` block, because the outer composite query rejects all
-graph access. See SEPARATION_TRADEOFFS in
-[`gateway/identity_sources.py`](gateway/identity_sources.py) and the tutorial.
+They differ on **path grants**:
+
+| | `composite` | `remote` |
+| --- | --- | --- |
+| Path grants (`grant_model: path` / `both`) | ✅ kept | ❌ `property` only |
+| Round trips | 1 (one statement, one transaction) | 2, with a consistency window |
+| Extra requirement | proxy nodes in the data constituent | none |
+
+A relationship cannot span two graphs, but a *traversal* can be cut at a node
+present in both — Neo4j's documented **proxy node** pattern. Under `composite`
+the engine cuts each grant at the identity/data boundary automatically and
+re-roots the data-side half at the proxy, so patterns are authored once and mean
+the same thing co-located or split. A grant that cannot be cut safely (an
+identity relationship appearing after the boundary, which would deny silently)
+is rejected at load. See GRANT_SPLITTING in
+[`gateway/mediation.py`](gateway/mediation.py).
 
 Adding another source (an external entitlement service, LDAP, token
-introspection) means implementing `IdentitySource` and registering it.
+introspection) means implementing `IdentitySource` and registering it — see
+[`gateway/identity_sources.py`](gateway/identity_sources.py).
 
 Want to try the entitlement model on Aura?
 [`docs/entitlement-testing-tutorial.md`](docs/entitlement-testing-tutorial.md)

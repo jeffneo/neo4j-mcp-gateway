@@ -312,16 +312,27 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
     # Fail at load rather than silently degrading to "no grant matched", which
     # under grant_model=path would deny everything and under `both` would quietly
     # fall back to ACLs without saying so.
-    if identity.source in SEPARATED_SOURCES and grant_model != GRANT_PROPERTY:
+    if identity.source == SOURCE_REMOTE and grant_model != GRANT_PROPERTY:
         raise ValueError(
-            f"{f}: security.identity.source={identity.source!r} separates identity from the data "
-            f"it protects, so the caller node cannot be reached from the data query. "
-            f"grant_model must be {GRANT_PROPERTY!r} (got {grant_model!r}). "
-            "Path grants and anchoring require security.identity.source=graph.")
-    if identity.source in SEPARATED_SOURCES and grants:
+            f"{f}: security.identity.source='remote' resolves identity over a different "
+            f"connection, so the data query has no caller node and no proxy to re-root a "
+            f"traversal at. grant_model must be {GRANT_PROPERTY!r} (got {grant_model!r}). "
+            "Use source: composite to keep path grants across a split, or source: graph.")
+    if identity.source == SOURCE_REMOTE and grants:
         raise ValueError(
             f"{f}: security.grants are path grants and cannot be evaluated when "
-            f"security.identity.source={identity.source!r}. Remove them or use source: graph.")
+            "security.identity.source='remote'. Remove them, or use source: composite.")
+    if identity.source == SOURCE_COMPOSITE and grants:
+        # Each grant must be cuttable at the identity/data boundary. Checking at
+        # load means an uncuttable pattern is a startup error rather than a silent
+        # denial at query time — see GRANT_SPLITTING in gateway/mediation.py.
+        from . import mediation
+        probe = SecurityPolicy(mode=mode, identity=identity, grant_model=grant_model)
+        for i, grant in enumerate(grants):
+            try:
+                mediation.split_grant(probe, grant.via)
+            except mediation.GrantSplitError as exc:
+                raise ValueError(f"{f}: security.grants[{i}] ({grant.label}): {exc}") from exc
 
     # Interpolated into Cypher as a backtick-quoted property key (see
     # COMPOSITE_PROPERTY_ACCESS in gateway/mediation.py), so it must not be able

@@ -27,14 +27,29 @@ security:
   permissions_property: "Permissions.Read"
   protected_labels: [Interaction, Opportunity, UsageSummary]
 
-  # Property model is REQUIRED here and the engine enforces it, because a path
-  # grant is a traversal from the caller and no caller node reaches the data
-  # query. Under `remote` that is inherent. Under `composite` it is an ENGINE
-  # limitation rather than a database one — the proxy-node pattern can split the
-  # traversal at a node present in both constituents, verified working, but the
-  # engine would have to compose the filter inside the USE block to emit it.
-  # See SEPARATION_TRADEOFFS in gateway/identity_sources.py.
-  grant_model: property
+  # The SAME grant model and the SAME grant patterns as the co-located
+  # client_platform bundle. Under `composite` the engine cuts each traversal at
+  # the identity/data boundary and re-roots the data-side half at a proxy node —
+  # see GRANT_SPLITTING in gateway/mediation.py. The patterns are authored once
+  # and mean the same thing in both topologies.
+  #
+  # Switching this bundle to `source: remote` below therefore requires removing
+  # the grants and setting grant_model: property, because a remote source has no
+  # proxy in the data database to re-root at. The engine says so at load.
+  grant_model: both
+  grants:
+    - label: Interaction
+      via: "(caller)-[:LOGGED]->(resource)"
+      reason: "logged this interaction"
+    - label: Interaction
+      via: "(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:WITH_CLIENT]-(resource)"
+      reason: "covers the client this interaction was with"
+    - label: Opportunity
+      via: "(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)"
+      reason: "covers the client this opportunity is for"
+    - label: UsageSummary
+      via: "(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)"
+      reason: "covers the client this usage belongs to"
 
   resource_keys:
     Interaction: interactionId

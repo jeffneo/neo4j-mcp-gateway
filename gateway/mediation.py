@@ -187,6 +187,133 @@ def _bind(pattern: str, var: str) -> str:
     return re.sub(r"\bresource\b", var, pattern.strip())
 
 
+# GRANT_SPLITTING
+# ---------------
+# A grant is a traversal from the caller to the row. When identity lives in a
+# different constituent of a composite database, that traversal cannot run as
+# one pattern — a relationship never spans two graphs. But a *node* can exist in
+# both, which is Neo4j's documented "proxy node" pattern, and the traversal can
+# be CUT there:
+#
+#   (caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)
+#   └──── identity constituent ─────┘ └────────────── data constituent ──────────────┘
+#                        ^ cut here: AdGroup exists in both, and its NAME crosses
+#                          as a value in authz.authzPrincipals
+#
+# The prelude already resolves the caller to that list of names, so the data-side
+# suffix is re-rooted at a proxy node identified by a value we already hold. What
+# runs in the data constituent is still a real query-time traversal, so the
+# no-materialisation and no-staleness properties survive.
+#
+# Where to cut is derived, not declared: walk from `caller` and consume the
+# leading run of IDENTITY-side relationship types (``identity.group_rels`` —
+# MEMBER_OF and friends, the edges that live in the identity graph). The node
+# where that run ends is the cut point.
+#
+#   * cut after a group hop  -> bind the proxy by name against authzPrincipals
+#   * cut at the caller      -> bind the caller's own proxy by principalId, which
+#                               is how (caller)-[:LOGGED]->(resource) survives
+#
+# THE FAILURE MODE, and why this validates at load: if an identity-side
+# relationship appears AFTER the cut, the suffix would run in the data
+# constituent where those edges do not exist. It would match nothing and deny
+# silently — a false negative, the error direction that hides data rather than
+# leaking it, and the one hardest to notice. Such a grant is rejected outright.
+_PATTERN_TOKEN = re.compile(r"\([^)]*\)|<?-\[[^\]]*\]->?")
+_CUT = "__secure_cut"
+
+
+class GrantSplitError(ValueError):
+    """A grant cannot be evaluated with identity in a separate constituent."""
+
+
+def _rel_types(token: str) -> list[str]:
+    inner = token[token.index("[") + 1: token.index("]")]
+    if ":" not in inner:
+        return []
+    types = inner.split(":", 1)[1].split("*", 1)[0]
+    return [t.strip() for t in types.split("|") if t.strip()]
+
+
+def _rebind_node(token: str, labels: list[str]) -> str:
+    """Turn a node token into the bound cut variable, keeping its label if any."""
+    inner = token[1:-1].strip()
+    label = inner.split(":", 1)[1].strip() if ":" in inner else ""
+    if not label:
+        label = "|".join(labels)
+    return f"({_CUT}:{label})" if label else f"({_CUT})"
+
+
+def split_grant(policy: SecurityPolicy, via: str) -> tuple[str, str]:
+    """Cut a grant pattern at the identity/data boundary.
+
+    Returns ``(data_side_pattern, cut_predicate)``. Raises
+    :class:`GrantSplitError` when the pattern cannot be cut safely.
+    """
+    via = via.strip()
+    compact = re.sub(r"\s+", "", via)
+    tokens = _PATTERN_TOKEN.findall(compact)
+    # Re-joining must reproduce the pattern exactly. If it does not, the tokenizer
+    # met something it does not model (a quantified path pattern, an inline WHERE)
+    # and the cut would be computed from an incomplete reading of the traversal.
+    if not tokens or "".join(tokens) != compact:
+        raise GrantSplitError(
+            f"pattern {via!r} is not a simple node/relationship chain, so the "
+            "identity/data cut point cannot be determined")
+    if "caller" not in tokens[0]:
+        raise GrantSplitError(
+            f"pattern {via!r} must start at (caller) to be split; write it left to right "
+            "from the caller")
+
+    group_rels = set(policy.identity.group_rels)
+    cut, i = 0, 1
+    while i < len(tokens) - 1:
+        types = _rel_types(tokens[i])
+        if types and all(t in group_rels for t in types):
+            cut, i = i + 1, i + 2
+        else:
+            break
+
+    data_tokens = tokens[cut:]
+    for token in data_tokens:
+        if token.startswith(("-", "<")):
+            leftover = [t for t in _rel_types(token) if t in group_rels]
+            if leftover:
+                raise GrantSplitError(
+                    f"pattern {via!r} uses identity relationship {leftover[0]!r} after the "
+                    "identity/data boundary. Those edges live in the identity constituent, so "
+                    "the check would match nothing and deny silently. Reorder the pattern so "
+                    "all identity hops come first, or use security.identity.source=graph")
+    if len(data_tokens) < 3:
+        raise GrantSplitError(
+            f"pattern {via!r} has no data-side traversal left after the identity hops, so "
+            "there is nothing for the data constituent to check")
+
+    if cut == 0:
+        bound = _rebind_node(tokens[0], policy.identity.labels)
+        predicate = (f"any(k IN ${P_MATCH_KEYS} "
+                     f"WHERE {_CUT}[k] = authz.principalId)")
+    else:
+        bound = _rebind_node(tokens[cut], [])
+        predicate = (f"any(k IN ${P_GROUP_KEYS} "
+                     f"WHERE {_CUT}[k] IN authz.authzPrincipals)")
+    return bound + "".join(data_tokens[1:]), predicate
+
+
+def grant_test(policy: SecurityPolicy, via: str, var: str) -> str:
+    """The EXISTS test proving one grant reaches ``var``.
+
+    Co-located, this is the grant pattern as authored. With identity in a separate
+    constituent it is the data-side half, re-rooted at a proxy node — see
+    GRANT_SPLITTING. Same semantics, same answer; only the starting point moves
+    from the caller NODE to a caller-derived VALUE.
+    """
+    if policy.identity.source != SOURCE_COMPOSITE:
+        return f"EXISTS {{ MATCH {_bind(via, var)} }}"
+    pattern, predicate = split_grant(policy, via)
+    return f"EXISTS {{ MATCH {_bind(pattern, var)} WHERE {predicate} }}"
+
+
 def _path_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
     """Grant test for one variable.
 
@@ -198,8 +325,7 @@ def _path_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
     """
     by_label: dict[str, list[str]] = {}
     for grant in policy.grants:
-        by_label.setdefault(grant.label, []).append(
-            f"EXISTS {{ MATCH {_bind(grant.via, var)} }}")
+        by_label.setdefault(grant.label, []).append(grant_test(policy, grant.via, var))
 
     governed = sorted(set(policy.protected_labels) | set(by_label))
     if not governed:
@@ -501,12 +627,20 @@ def compose(
                 f"anchoring requires the caller node, which security.identity.source="
                 f"{policy.identity.source!r} does not provide. Remove the anchor or use "
                 "security.identity.source=graph.")
-        use = ""
-        if policy.identity.source == SOURCE_COMPOSITE:
-            use = f"USE {policy.identity.data_graph}\n  "
-        body = ("CALL {\n  " + use + match_clause.strip()
-                + "\n  RETURN " + ", ".join(scope) + "\n}")
         filt = build_filter(policy, scope, protect)
+        if policy.identity.source == SOURCE_COMPOSITE:
+            # The filter runs INSIDE the constituent, not in the outer composite
+            # query, because a composite query may not perform graph access at all
+            # (42NA1) — and a path grant is graph access. Filtering here is also
+            # strictly better: rows are discarded before they cross the boundary.
+            inner = "\n  ".join(
+                ["USE " + policy.identity.data_graph, "WITH authz",
+                 match_clause.strip(), filt.replace("\n", "\n  "),
+                 "RETURN " + ", ".join(scope)])
+            return _subst("\n".join(
+                [prelude_for(policy), "CALL {\n  " + inner + "\n}", final_return]), policy)
+        body = ("CALL {\n  " + match_clause.strip()
+                + "\n  RETURN " + ", ".join(scope) + "\n}")
         return _subst("\n".join([prelude_for(policy), body, filt, final_return]), policy)
 
     if anchor:
@@ -581,17 +715,33 @@ def explain_query(policy: SecurityPolicy, label: str, key_property: str) -> str:
     # Each UNION arm is independent and must import the variables it uses.
     # OPTIONAL MATCH keeps one row per grant whether or not it matched, so a
     # resource with no matching grant still yields a row to report on.
-    # A separated identity source has no caller node, so there are no path grants
-    # to report and the resource lookup must be scoped to the data graph. The ACL
-    # explanation still works, which is the only route those bundles can use.
+    # A separated identity source has no caller node, so the resource lookup must
+    # be scoped to the data graph. Under `composite` the split grants can still be
+    # reported — each one is a data-side traversal — so provenance survives; the
+    # matched path is not rendered because the identity-side prefix is not walked.
     if not binds_caller(policy):
-        use = (f"USE {policy.identity.data_graph}\n  "
-               if policy.identity.source == SOURCE_COMPOSITE else "")
-        return _subst(f"""{prelude_for(policy)}
+        if policy.identity.source == SOURCE_COMPOSITE:
+            arms = [
+                f"      CASE WHEN {grant_test(policy, g.via, 'resource')} THEN {i} ELSE null END"
+                for i, g in enumerate(policy.grants) if g.label == label
+            ]
+            matched = (
+                "[x IN [\n" + ",\n".join(arms)
+                + "\n    ] WHERE x IS NOT NULL | {idx: x, nodes: [], rels: []}]"
+            ) if arms else "[]"
+            return _subst(f"""{prelude_for(policy)}
 CALL {{
-  {use}MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
-  RETURN resource
+  USE {policy.identity.data_graph}
+  WITH authz
+  MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
+  RETURN resource,
+    {matched} AS matched,
+    [x IN coalesce(resource.`@@PERM_PROP@@`, [])
+       WHERE x IN authz.authzPrincipals] AS aclMatches
 }}
+RETURN matched, aclMatches, authz.authzPrincipals AS principals""", policy)
+        return _subst(f"""{prelude_for(policy)}
+MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
 RETURN
   [] AS matched,
   [x IN coalesce(resource.`@@PERM_PROP@@`, [])
