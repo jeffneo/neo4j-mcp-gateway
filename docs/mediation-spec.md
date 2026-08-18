@@ -158,6 +158,23 @@ live database, in addition to running every tool:
   indistinguishable from no filter, so each mediated tool is run as several real
   principals and the results compared.
 
+### Measuring the cost
+
+`scripts/bench_mediation.py` runs each mediated tool three ways — open (no
+prelude, no filter), mediated, and the prelude alone — and reports wall-clock
+percentiles plus `PROFILE` database hits, separating the **fixed** cost
+(identity resolution, once per call) from the **variable** cost (the row filter,
+which scales with rows examined):
+
+```bash
+uv run python scripts/bench_mediation.py iam --runs 50
+```
+
+Prefer db hits to wall-clock on small datasets: wall-clock there is mostly
+network round-trip. Only the variable component grows with your data, so the
+fixed component is the one to attack — by caching resolved principals, or by
+sourcing them from an external policy service instead of a graph traversal.
+
 ## 6. Known limits
 
 - **The gateway is the enforcement boundary**, not the database. Anyone with

@@ -276,3 +276,13 @@ def compose(
 
 def resolve_identity_query(policy: SecurityPolicy) -> str:
     return _subst(RESOLVE_IDENTITY_QUERY, policy)
+
+
+def prelude_only_query(policy: SecurityPolicy) -> str:
+    """The authorization prelude with nothing after it.
+
+    The fixed per-call cost of mediation: resolving the caller and expanding
+    their principals. Used by scripts/bench_mediation.py to separate that
+    constant overhead from the filter, which scales with rows examined.
+    """
+    return _subst(_PRELUDE, policy) + "\nRETURN authz.authzPrincipals AS principals"
