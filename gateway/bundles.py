@@ -101,6 +101,12 @@ class IdentityConfig:
     # source: remote — env prefix for the identity connection, so the credentials
     # stay in a git-ignored .env like every other connection in this repo.
     remote_env_prefix: str = "IDENTITY"
+    # Label -> property holding the identity-side name at the boundary, e.g.
+    # {Client: coverageTeam}. Declaring one lets a grant cut at that PROPERTY
+    # instead of at a proxy node, which removes the proxies entirely and drops a
+    # hop. See PROPERTY_CUT in gateway/mediation.py — including the hazard that
+    # the property and the relationship are two recordings of the same fact.
+    boundary_properties: dict[str, str] = field(default_factory=dict)
 
     labels: list[str] = field(default_factory=lambda: ["User", "Principal"])
     match_keys: list[str] = field(
@@ -226,6 +232,8 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
         identity_graph=str(id_raw.get("identity_graph") or "").strip(),
         data_graph=str(id_raw.get("data_graph") or "").strip(),
         remote_env_prefix=str(id_raw.get("remote_env_prefix") or defaults.remote_env_prefix).strip(),
+        boundary_properties={str(k): str(v)
+                             for k, v in (id_raw.get("boundary_properties") or {}).items()},
         labels=[str(x) for x in (id_raw.get("labels") or defaults.labels)],
         match_keys=[str(x) for x in (id_raw.get("match_keys") or defaults.match_keys)],
         group_rels=[str(x) for x in (id_raw.get("group_rels") or defaults.group_rels)],
@@ -261,6 +269,13 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
             raise ValueError(
                 f"{f}: security.identity.identity_graph and data_graph are the same constituent "
                 f"({identity.data_graph!r}); use source: graph instead")
+    for label, prop in identity.boundary_properties.items():
+        # Both are interpolated into Cypher (the label into a pattern, the
+        # property inside backticks), so neither may break out.
+        if not label.replace("_", "").isalnum() or not _PROPERTY_KEY.match(prop):
+            raise ValueError(
+                f"{f}: security.identity.boundary_properties has invalid entry "
+                f"{label!r}: {prop!r}")
     if identity.source == SOURCE_REMOTE and not identity.remote_env_prefix.replace("_", "").isalnum():
         raise ValueError(
             f"{f}: security.identity.remote_env_prefix={identity.remote_env_prefix!r} is not a "

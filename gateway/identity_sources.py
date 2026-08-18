@@ -55,10 +55,12 @@ caller on every row.
 
 What separation actually costs:
 
-1. **Replication surface.** Every node a grant or anchor passes through needs a
-   proxy in the data database, and the data-side relationships must live there
-   (``COVERED_BY``, ``LOGGED``). Membership stays in the identity store — the
-   high-churn half, the part that changes when someone moves desks.
+1. **Replication surface** — *unless the boundary is already a property.* A
+   grant cut at a proxy NODE needs that node in the data database. But where the
+   boundary is recorded as a property (the covering team on the Client, the
+   author on the Interaction), ``identity.boundary_properties`` cuts there
+   instead and no proxies are needed at all. The proxy is the fallback, not the
+   requirement.
 2. **No tools scoping to ``caller``.** Tools get no caller binding, so "the
    clients I cover" must be expressed with an anchor or a parameter rather than
    by referencing ``caller`` in the match.

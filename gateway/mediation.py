@@ -235,19 +235,58 @@ def _rel_types(token: str) -> list[str]:
     return [t.strip() for t in types.split("|") if t.strip()]
 
 
+def _node_parts(token: str) -> tuple[str, str]:
+    """Split a node token into ``(variable, label_expression)``; either may be ''."""
+    inner = token[1:-1].strip()
+    if ":" in inner:
+        var, label = inner.split(":", 1)
+        return var.strip(), label.strip()
+    return inner, ""
+
+
 def _rebind_node(token: str, labels: list[str]) -> str:
     """Turn a node token into the bound cut variable, keeping its label if any."""
-    inner = token[1:-1].strip()
-    label = inner.split(":", 1)[1].strip() if ":" in inner else ""
+    _, label = _node_parts(token)
     if not label:
         label = "|".join(labels)
     return f"({_CUT}:{label})" if label else f"({_CUT})"
 
 
-def split_grant(policy: SecurityPolicy, via: str) -> tuple[str, str]:
+# PROPERTY_CUT
+# ------------
+# The node cut needs a proxy node on the data side, because the traversal has to
+# land somewhere. But a boundary is often already recorded as a PROPERTY: the
+# covering team is written on the Client, the author's address on the Interaction.
+# Where that is true the cut can go one node further and compare the property
+# instead, which removes the proxy nodes entirely and drops a hop:
+#
+#   node cut      (cut:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)
+#                 WHERE cut.name IN authz.authzPrincipals
+#   property cut  (c:Client)<-[:FOR_CLIENT]-(resource)
+#                 WHERE c.coverageTeam IN authz.authzPrincipals
+#
+# Declared per label under ``security.identity.boundary_properties``. Declaring it
+# IS the opt-in; a grant whose boundary lands on a declared label uses it.
+#
+# THE HAZARD, and why the conformance suite must cover both: the property and the
+# relationship are two recordings of the same fact, and they can disagree. A
+# Client whose ``coverageTeam`` was updated without rewriting ``COVERED_BY``
+# (or the reverse) makes the two cuts return different rows. Nothing here can
+# detect that from the pattern alone, so a bundle using a property cut should
+# keep a ``differential:`` case proving the two agree on real data.
+def _cut_predicate(var: str, prop: str, by_caller: bool) -> str:
+    if by_caller:
+        return f"{var}.`{prop}` = authz.principalId"
+    return f"{var}.`{prop}` IN authz.authzPrincipals"
+
+
+def split_grant(policy: SecurityPolicy, via: str, resource_label: str = "",
+                keep_terminal_node: bool = False) -> tuple[str, str]:
     """Cut a grant pattern at the identity/data boundary.
 
-    Returns ``(data_side_pattern, cut_predicate)``. Raises
+    Returns ``(data_side_pattern, cut_predicate)``; the pattern is ``''`` when the
+    boundary property sits on the resource itself, so no traversal is needed at
+    all and the predicate applies directly to the row. Raises
     :class:`GrantSplitError` when the pattern cannot be cut safely.
     """
     via = via.strip()
@@ -289,6 +328,36 @@ def split_grant(policy: SecurityPolicy, via: str) -> tuple[str, str]:
             f"pattern {via!r} has no data-side traversal left after the identity hops, so "
             "there is nothing for the data constituent to check")
 
+    # Property cut: skip the proxy node entirely and compare a property on the
+    # node one hop further in. See PROPERTY_CUT above.
+    boundary = policy.identity.boundary_properties
+    if boundary and len(tokens) > cut + 2:
+        target = tokens[cut + 2]
+        var, label = _node_parts(target)
+        # The resource's label is declared on the grant, not written in the
+        # pattern, so fall back to it for the terminal node.
+        if not label and var == "resource":
+            label = resource_label
+        prop = boundary.get(label.split("|")[0].split("&")[0].strip()) if label else None
+        if prop:
+            rest = tokens[cut + 2:]
+            if len(rest) == 1:
+                # The boundary property sits on the terminal node itself, so there
+                # is no traversal left. For a grant that is ideal: the variable is
+                # already bound, so the test collapses to a bare comparison. An
+                # ANCHOR still needs something to MATCH, so it asks for the node
+                # pattern back — a label scan plus a property predicate, which is
+                # exactly the anchor you would hand-write.
+                bound_var = var or "resource"
+                if keep_terminal_node:
+                    node = f"({bound_var}:{label})" if label else f"({bound_var})"
+                    return node, _cut_predicate(bound_var, prop, cut == 0)
+                return "", _cut_predicate(bound_var, prop, cut == 0)
+            bound_var = var or _CUT
+            bound = f"({bound_var}:{label})" if label else f"({bound_var})"
+            return (bound + "".join(rest[1:]),
+                    _cut_predicate(bound_var, prop, cut == 0))
+
     if cut == 0:
         bound = _rebind_node(tokens[0], policy.identity.labels)
         predicate = (f"any(k IN ${P_MATCH_KEYS} "
@@ -308,7 +377,7 @@ def split_anchor(policy: SecurityPolicy, variable: str, pattern: str) -> tuple[s
     must survive the cut: if it sits at the cut point it would be replaced by the
     bound proxy variable and the tool's match would lose its starting point.
     """
-    data_pattern, predicate = split_grant(policy, pattern)
+    data_pattern, predicate = split_grant(policy, pattern, keep_terminal_node=True)
     if not re.search(rf"\b{re.escape(variable)}\b", data_pattern):
         raise GrantSplitError(
             f"anchor variable {variable!r} is on the identity side of the split, so the data "
@@ -316,7 +385,8 @@ def split_anchor(policy: SecurityPolicy, variable: str, pattern: str) -> tuple[s
     return data_pattern, predicate
 
 
-def grant_test(policy: SecurityPolicy, via: str, var: str) -> str:
+def grant_test(policy: SecurityPolicy, via: str, var: str,
+               resource_label: str = "") -> str:
     """The EXISTS test proving one grant reaches ``var``.
 
     Co-located, this is the grant pattern as authored. With identity in a separate
@@ -326,8 +396,11 @@ def grant_test(policy: SecurityPolicy, via: str, var: str) -> str:
     """
     if policy.identity.source == SOURCE_GRAPH:
         return f"EXISTS {{ MATCH {_bind(via, var)} }}"
-    pattern, predicate = split_grant(policy, via)
-    return f"EXISTS {{ MATCH {_bind(pattern, var)} WHERE {predicate} }}"
+    pattern, predicate = split_grant(policy, via, resource_label)
+    if not pattern:
+        # Property cut landing on the row itself — a bare comparison, no subquery.
+        return f"({_bind(predicate, var)})"
+    return f"EXISTS {{ MATCH {_bind(pattern, var)} WHERE {_bind(predicate, var)} }}"
 
 
 def _path_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
@@ -341,7 +414,8 @@ def _path_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
     """
     by_label: dict[str, list[str]] = {}
     for grant in policy.grants:
-        by_label.setdefault(grant.label, []).append(grant_test(policy, grant.via, var))
+        by_label.setdefault(grant.label, []).append(
+            grant_test(policy, grant.via, var, grant.label))
 
     governed = sorted(set(policy.protected_labels) | set(by_label))
     if not governed:
@@ -751,7 +825,7 @@ def explain_query(policy: SecurityPolicy, label: str, key_property: str) -> str:
         # not rendered, because the identity-side prefix was resolved elsewhere and
         # is not walked here.
         arms = [
-            f"      CASE WHEN {grant_test(policy, g.via, 'resource')} THEN {i} ELSE null END"
+            f"      CASE WHEN {grant_test(policy, g.via, 'resource', g.label)} THEN {i} ELSE null END"
             for i, g in enumerate(policy.grants) if g.label == label
         ]
         matched = (

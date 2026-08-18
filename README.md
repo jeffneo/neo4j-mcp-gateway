@@ -232,6 +232,61 @@ at ~17x either side of the split on 100,000 rows
 is tools that reference `caller` in their match; express that scoping with an
 anchor or a parameter instead.
 
+**Cutting at a property instead of a proxy node** removes the proxies entirely.
+Where the boundary is already recorded as a property — the covering team on the
+Client, the author on the Interaction — declare it and the grant compares that
+property instead of traversing to a proxy:
+
+```yaml
+identity:
+  boundary_properties:
+    Client: coverageTeam
+    Interaction: loggedByEmail
+```
+
+The `client_platform_split` bundle runs this way against a database holding **no
+`AdGroup` or `User` nodes at all**, with results identical to co-located across
+24 comparisons. Each grant also loses a hop, and a boundary property on the row
+itself collapses to a bare comparison with no subquery.
+
+> The property and the relationship are two recordings of one fact and can drift
+> apart. Nothing detects that from the pattern alone, so keep a `differential:`
+> conformance case proving they agree on real data.
+
+### Downstream identity: making native rules apply to the end user
+
+Native database rules (RBAC, property rules, ABAC-assigned roles) are evaluated
+against the account that **connects**. A gateway holding one service connection
+gets them evaluated against the service account, so no per-user rule applies at
+all. Two ways to close that, per session:
+
+```bash
+NEO4J_MCP_ACCESS_TOKEN=<jwt>       # the caller's token authenticates the session
+NEO4J_MCP_DB_IMPERSONATION=true    # service account impersonates the principal
+```
+
+With a token, **the database validates it** — signature, issuer, audience,
+expiry — and maps its claims to roles. The gateway never inspects it, which is
+the point: token validation belongs to something built for it. Setting both is
+refused, since a token already asserts who the caller is.
+
+These compose with mediation rather than replacing it. Measured with a real PBAC
+rule (`FOR (o:Opportunity) WHERE o.stage = 'Proposal'`) on a real native role:
+
+| | Rows |
+| --- | --- |
+| service account — mediation only (her coverage) | 2 |
+| impersonated — mediation ∩ PBAC | **1** |
+
+The caller sees the **intersection**, which is what a layered model should do.
+
+> One deployment note found the hard way: with identity co-located, the
+> impersonated user also needs read access to the identity graph, or the
+> authorization prelude resolves nothing and every query returns zero rows. It
+> fails closed, but it looks like an entitlement bug. `identity.source: remote`
+> avoids it — identity resolution uses its own connection and only the data query
+> is impersonated.
+
 Adding another source (an external entitlement service, LDAP, token
 introspection) means implementing `IdentitySource` and registering it — see
 [`gateway/identity_sources.py`](gateway/identity_sources.py).

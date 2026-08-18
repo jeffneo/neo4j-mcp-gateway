@@ -335,6 +335,37 @@ def _to_jsonable(value: Any) -> Any:
     return str(value)
 
 
+# DOWNSTREAM_IDENTITY
+# -------------------
+# Native database rules (RBAC, property-based rules, roles assigned by attribute)
+# are evaluated against the ACCOUNT THAT CONNECTS. A gateway holding one service
+# connection therefore gets them evaluated against the service account, and no
+# per-user rule applies at all — the layer-2 floor described in
+# docs/entitlement-model-brief.md is simply absent.
+#
+# Two ways to close that, both per session, neither changing our own filtering:
+#
+#   NEO4J_MCP_ACCESS_TOKEN=<jwt>      the caller's token authenticates the
+#                                     session. THE DATABASE validates it —
+#                                     signature, issuer, audience, expiry — and
+#                                     maps its claims to roles. We never inspect
+#                                     it, which is the point: token validation
+#                                     belongs to something built for it.
+#   NEO4J_MCP_DB_IMPERSONATION=true   the service account connects and
+#                                     impersonates the resolved principal, so
+#                                     that user's roles and property rules apply.
+#
+# They are alternatives, not layers, and setting both is refused: a token already
+# asserts who the caller is, and impersonating someone else on top of it makes
+# the effective identity ambiguous.
+#
+# NOTE the name collision to avoid: NEO4J_MCP_ALLOW_IMPERSONATION is a different
+# switch entirely — it lets a TOOL CALLER claim a principal for testing, which is
+# about our layer 3. This one is about which database user the connection runs as.
+ENV_ACCESS_TOKEN = "NEO4J_MCP_ACCESS_TOKEN"
+ENV_DB_IMPERSONATION = "NEO4J_MCP_DB_IMPERSONATION"
+
+
 class Neo4jExecutor:
     """Thin wrapper around the Neo4j driver used by YAML tools.
 
@@ -346,6 +377,27 @@ class Neo4jExecutor:
     def __init__(self, config: Config):
         self._config = config
         self._driver: neo4j.Driver | None = None
+        env = config.env_snapshot
+        self._token = str(env.get(ENV_ACCESS_TOKEN, "")).strip()
+        self._impersonate = str(
+            env.get(ENV_DB_IMPERSONATION, "")).strip().lower() in {"true", "1", "yes"}
+        if self._token and self._impersonate:
+            raise ToolError(
+                f"set {ENV_ACCESS_TOKEN} or {ENV_DB_IMPERSONATION}, not both: a token already "
+                "asserts who the caller is, so impersonating another user on top of it leaves "
+                "the effective database identity ambiguous")
+
+    def _session_kwargs(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Per-session identity, so native rules apply to the END USER."""
+        from . import mediation
+        kwargs: dict[str, Any] = {"database": self._config.neo4j_database}
+        if self._token:
+            kwargs["auth"] = neo4j.bearer_auth(self._token)
+        elif self._impersonate:
+            principal = params.get(mediation.P_PRINCIPAL)
+            if principal:
+                kwargs["impersonated_user"] = str(principal)
+        return kwargs
 
     def _get_driver(self) -> neo4j.Driver:
         if self._driver is None:
@@ -375,10 +427,19 @@ class Neo4jExecutor:
             result = tx.run(cypher, params)
             return [ {k: _to_jsonable(v) for k, v in record.items()} for record in result ]
 
-        with driver.session(database=self._config.neo4j_database) as session:
-            if read_only:
-                return session.execute_read(_work)
-            return session.execute_write(_work)
+        try:
+            with driver.session(**self._session_kwargs(params)) as session:
+                if read_only:
+                    return session.execute_read(_work)
+                return session.execute_write(_work)
+        except neo4j.exceptions.AuthError as exc:
+            # Most often an expired or rejected access token. Say so plainly —
+            # the message must not echo the token itself.
+            if self._token:
+                raise ToolError(
+                    "the database rejected the access token (expired, wrong audience, or "
+                    f"unknown issuer): {exc.code}") from exc
+            raise
 
 
 # --------------------------------------------------------------------------- #

@@ -6,8 +6,13 @@
 //  evaluated when identity lives in a different database: the traversal is cut
 //  at a node present on both sides, and the identifier crosses as a value.
 //
-//  Needed by BOTH separated topologies — composite (identity.source: composite)
-//  and a second connection (identity.source: remote). The cut is the same; only
+//  OPTIONAL as of the property cut. If the bundle declares
+//  security.identity.boundary_properties — as client_platform_split now does —
+//  grants cut at Client.coverageTeam and Interaction.loggedByEmail instead, and
+//  no proxy nodes are needed at all. Load this only when the boundary is NOT
+//  already recorded as a property and the cut has to land on a node.
+//
+//  Applies to both separated topologies; the cut is the same either way, and only
 //  the way the caller's principals reach this database differs.
 //
 //  Load order, into the DATA database:

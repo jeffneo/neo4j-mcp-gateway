@@ -61,6 +61,17 @@ security:
     source: composite
     identity_graph: fed.identity
     data_graph: fed.data
+
+    # Cut each grant at a PROPERTY rather than at a proxy node. platform.cypher
+    # already records the covering team on the Client and the author on the
+    # Interaction, so no AdGroup or User proxies are needed in the data database
+    # at all — and each grant loses a hop. See PROPERTY_CUT in
+    # gateway/mediation.py, including the hazard: the property and the
+    # relationship are two recordings of one fact and can drift apart, which is
+    # why the conformance suite compares this bundle against the co-located one.
+    boundary_properties:
+      Client: coverageTeam
+      Interaction: loggedByEmail
     #
     # ---- Topology F: remote connection (two round trips, two instances) ------
     # Comment out the three lines above and uncomment these two. No composite

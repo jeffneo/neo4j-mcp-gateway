@@ -243,6 +243,44 @@ convention, not tamper-evident. There is no hash chain and no signature. A
 deployment that needs those should ship lines to a WORM store or a SIEM at write
 time; this file is the source, not the control.
 
+## 5c. Downstream identity
+
+Native database rules — RBAC, property-based rules, roles assigned by attribute —
+are evaluated against the account that **connects**. A gateway holding one
+service connection therefore has them evaluated against the service account, and
+the layer-2 floor is absent. Two per-session ways to close that, in
+`gateway/yaml_tools.py` (see DOWNSTREAM_IDENTITY):
+
+| Variable | Effect |
+| --- | --- |
+| `NEO4J_MCP_ACCESS_TOKEN` | the session authenticates with the caller's token; **the database** validates signature, issuer, audience and expiry, and maps claims to roles |
+| `NEO4J_MCP_DB_IMPERSONATION` | the service account impersonates the resolved principal, so that user's roles and property rules apply |
+
+Setting both is refused: a token already asserts who the caller is, so
+impersonating another user on top leaves the effective identity ambiguous.
+
+Do not confuse `NEO4J_MCP_DB_IMPERSONATION` with `NEO4J_MCP_ALLOW_IMPERSONATION`.
+The latter lets a *tool caller* claim a principal for testing — a layer-3 switch.
+This one decides which *database user* the connection runs as.
+
+**They compose with mediation rather than replacing it.** Measured against a real
+native role carrying `GRANT MATCH ... FOR (o:Opportunity) WHERE o.stage =
+'Proposal'`: the same caller sees 2 rows through mediation alone (her coverage)
+and 1 impersonated — the intersection of layer 2 and layer 3.
+
+**Deployment note.** With identity co-located, the impersonated user must also be
+able to read the identity graph, or the authorization prelude resolves nothing
+and every query returns zero rows. That fails closed, but it presents as an
+entitlement bug rather than a permissions one. `identity.source: remote` avoids
+it: identity resolution uses its own connection, and only the data query is
+impersonated.
+
+**Not solved by this.** A token supplies *group membership*; it cannot express a
+relationship-derived entitlement ("the person who logged this record"). Native
+property rules compare a property to a constant fixed at grant time, so
+team-scoped rules cost one role per team. Both remain layer-3 work — which is
+the argument in §6 of `entitlement-model-brief.md`, unchanged.
+
 ## 6. Known limits
 
 - **The gateway is the enforcement boundary**, not the database. Anyone with
