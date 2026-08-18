@@ -474,9 +474,17 @@ def _check_mediated_spec(spec: ToolSpec, policy=None) -> None:
                 "outside this database, so no caller node exists here. Express the scoping "
                 "with a parameter, or use security.identity.source=graph.")
         if spec.anchor:
-            raise ToolSpecError(
-                f"{spec.source_path.name}: 'anchor' traverses from the caller, which "
-                f"security.identity.source={policy.identity.source!r} does not provide.")
+            # An anchor is a traversal from the caller, so it splits at the proxy
+            # exactly like a grant. Validate the cut at load, because an anchor
+            # that cannot be cut would otherwise fail at query time — and a
+            # too-narrow anchor hides rows silently (see ANCHOR_SAFETY).
+            from . import mediation
+            try:
+                mediation.split_anchor(policy, spec.anchor[0], spec.anchor[1])
+            except mediation.GrantSplitError as exc:
+                raise ToolSpecError(
+                    f"{spec.source_path.name}: 'anchor' cannot be evaluated with "
+                    f"security.identity.source={policy.identity.source!r}: {exc}") from exc
     if not spec.is_mediated_form:
         raise ToolSpecError(
             f"{spec.source_path.name}: this bundle declares security.mode=mediated, so tools must "

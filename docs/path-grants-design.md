@@ -267,6 +267,38 @@ author-trusted config at the same level as a tool's own query (never caller
 input); and variable-length grant patterns are expensive per row, so the
 reference should recommend bounded patterns.
 
+### Anchoring across a separated identity source
+
+The anchor was assumed to require the caller node, which would have made it
+unavailable whenever identity lives in another database. It does not: an anchor
+is a traversal from the caller, so it cuts at a proxy node exactly like a grant.
+`scripts/bench_separation.py` measures six compositions on 100,000 trades at 1%
+visibility, all returning the identical answer:
+
+| Composition | p50 | db hits |
+| --- | --- | --- |
+| co-located, scan + ACL | 76.9 ms | 304,018 |
+| co-located, scan + path | 98.4 ms | 1,999,518 |
+| co-located, anchored + path | 4.4 ms | 22,540 |
+| split, scan + split-path | 68.7 ms | 1,302,001 |
+| split, anchored-split | 4.7 ms | 17,008 |
+| split, anchored + ACL | 3.1 ms | 9,008 |
+
+**The anchor is worth ~17x on either side of the split.** Its benefit comes from
+starting at a small known set instead of scanning, and that set can be derived
+from a value (the caller's group names) as well as from a node — which is why
+separation does not have to cost it.
+
+**Splitting a grant is marginally cheaper than not splitting it** (68.7 ms /
+1.30M hits against 98.4 ms / 2.00M). The split form starts at the row and
+traverses out to a proxy, then tests a name against a short list; the co-located
+form re-expands from the caller for every row examined. Not a reason to separate,
+but it does retire the assumption that the split form must be slower.
+
+Consequence for how this is described: "separating identity costs you anchoring"
+was wrong. What separation costs is replication surface — proxies for every node
+a grant or anchor traverses — plus tools that reference `caller` directly.
+
 ## 6. Scope
 
 Revised by the spike results — anchoring moves first, because it is where the

@@ -127,3 +127,25 @@ cases:
     principals: [lena.fischer@bank.com, evan.brooks@bank.com, sofia.rossi@bank.com]
     tool: client_opportunities
     id_field: product
+
+  # --- Anchoring, split at the proxy -----------------------------------------
+  # The harness runs every anchored tool a SECOND time without its anchor and
+  # fails on any difference. That is what catches a too-narrow cut, which would
+  # hide rows the caller is entitled to rather than leaking any.
+  - name: an anchored tool returns the caller's own pipeline
+    principal: lena.fischer@bank.com
+    tool: covered_client_opportunities
+    id_field: product
+    must_see: [Portfolio Analytics Credit, Electronic Execution]
+
+  - name: anchoring does not widen what another caller sees
+    principal: evan.brooks@bank.com
+    tool: covered_client_opportunities
+    id_field: product
+    must_see: [Market Dashboards]
+    expect_count: 1
+
+  - name: coverage colleagues get identical anchored results
+    same_for: [lena.fischer@bank.com, marc.dubois@bank.com]
+    tool: covered_client_opportunities
+    id_field: product

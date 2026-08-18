@@ -300,6 +300,22 @@ def split_grant(policy: SecurityPolicy, via: str) -> tuple[str, str]:
     return bound + "".join(data_tokens[1:]), predicate
 
 
+def split_anchor(policy: SecurityPolicy, variable: str, pattern: str) -> tuple[str, str]:
+    """Cut an anchor pattern at the identity/data boundary.
+
+    An anchor is a traversal from the caller, exactly like a grant, so it splits
+    by the same rule. The one extra requirement is that the anchor's own variable
+    must survive the cut: if it sits at the cut point it would be replaced by the
+    bound proxy variable and the tool's match would lose its starting point.
+    """
+    data_pattern, predicate = split_grant(policy, pattern)
+    if not re.search(rf"\b{re.escape(variable)}\b", data_pattern):
+        raise GrantSplitError(
+            f"anchor variable {variable!r} is on the identity side of the split, so the data "
+            "query has nothing to anchor on. Anchor on a node that lives in the data database")
+    return data_pattern, predicate
+
+
 def grant_test(policy: SecurityPolicy, via: str, var: str) -> str:
     """The EXISTS test proving one grant reaches ``var``.
 
@@ -618,30 +634,40 @@ def compose(
     protect = [v for v in (protect or []) if v in scope]
 
     if not binds_caller(policy):
-        # Separated identity: no caller node reaches the data query, so there is
-        # nothing to anchor from and no path grant to evaluate. Manifest
-        # validation rejects grants and this rejects anchors, so the two error
-        # paths together mean a separated bundle cannot silently lose a route.
-        if anchor:
-            raise ToolError(
-                f"anchoring requires the caller node, which security.identity.source="
-                f"{policy.identity.source!r} does not provide. Remove the anchor or use "
-                "security.identity.source=graph.")
+        # Separated identity. There is no caller node, but an anchor does not
+        # actually need one — like a grant, it is a traversal FROM the caller, and
+        # it can be cut at the same proxy. Measured on 100,000 trades at 1%
+        # visibility: the split anchor reaches 6.2 ms / 17,008 db hits against
+        # 79 ms / 1,302,001 unanchored, matching co-located anchoring (6.3 ms).
+        # See scripts/bench_separation.py.
         filt = build_filter(policy, scope, protect)
+        steps = [match_clause.strip()]
+        if anchor:
+            anchor_var, anchor_pattern = anchor
+            pattern, predicate = split_anchor(policy, anchor_var, anchor_pattern)
+            inner_scope = [v for v in scope if v != anchor_var]
+            steps = [f"MATCH {pattern}", f"WHERE {predicate}",
+                     f"WITH DISTINCT authz, {anchor_var}"]
+            if inner_scope:
+                steps.append("CALL {\n  WITH " + anchor_var + "\n  " + match_clause.strip()
+                             + "\n  RETURN " + ", ".join(inner_scope) + "\n}")
+        steps += [filt, "RETURN " + ", ".join(scope)]
+
         if policy.identity.source == SOURCE_COMPOSITE:
             # The filter runs INSIDE the constituent, not in the outer composite
             # query, because a composite query may not perform graph access at all
             # (42NA1) — and a path grant is graph access. Filtering here is also
             # strictly better: rows are discarded before they cross the boundary.
             inner = "\n  ".join(
-                ["USE " + policy.identity.data_graph, "WITH authz",
-                 match_clause.strip(), filt.replace("\n", "\n  "),
-                 "RETURN " + ", ".join(scope)])
+                ["USE " + policy.identity.data_graph, "WITH authz"]
+                + [s.replace("\n", "\n  ") for s in steps])
             return _subst("\n".join(
                 [prelude_for(policy), "CALL {\n  " + inner + "\n}", final_return]), policy)
-        body = ("CALL {\n  " + match_clause.strip()
-                + "\n  RETURN " + ", ".join(scope) + "\n}")
-        return _subst("\n".join([prelude_for(policy), body, filt, final_return]), policy)
+        # Still a subquery, even without a USE clause: only `scope` escapes it, so
+        # a variable the match bound but did not declare cannot reach the output.
+        body = ("CALL {\n  WITH authz\n  "
+                + "\n  ".join(s.replace("\n", "\n  ") for s in steps) + "\n}")
+        return _subst("\n".join([prelude_for(policy), body, final_return]), policy)
 
     if anchor:
         anchor_var, anchor_pattern = anchor

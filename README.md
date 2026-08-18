@@ -186,12 +186,16 @@ rejected at load. See GRANT_SPLITTING in
 | | `composite` | `remote` |
 | --- | --- | --- |
 | Path grants (`grant_model: path` / `both`) | ✅ | ✅ |
+| Anchoring | ✅ | ✅ |
 | Round trips | 1 (one statement, one transaction) | 2, with a consistency window |
 | Needs a composite database | yes | no — any two connections |
-| Proxy nodes in the data database | required for path grants | required for path grants |
+| Proxy nodes in the data database | required | required |
 
-Both give up **anchoring** and tools that reference `caller`, since neither binds
-a caller node for tool authors to traverse from.
+Anchors split by the same rule, so the performance lever survives too — measured
+at ~17x either side of the split on 100,000 rows
+([`scripts/bench_separation.py`](scripts/bench_separation.py)). What both give up
+is tools that reference `caller` in their match; express that scoping with an
+anchor or a parameter instead.
 
 Adding another source (an external entitlement service, LDAP, token
 introspection) means implementing `IdentitySource` and registering it — see

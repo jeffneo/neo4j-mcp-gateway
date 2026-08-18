@@ -327,10 +327,10 @@ Both give up the caller **node** in the data query:
 | Curated-only posture, harness, `explain-access` | ✅ | ✅ |
 | One statement, one transaction | ✅ | ❌ two round trips, consistency window |
 | **Path grants** | ✅ via proxy nodes | ✅ via proxy nodes |
-| **Anchoring** | ❌ | ❌ |
-| Tools scoping to `caller` | ❌ must use a parameter | ❌ |
+| **Anchoring** | ✅ via proxy nodes | ✅ via proxy nodes |
+| Tools scoping to `caller` | ❌ use an anchor or a parameter | ❌ same |
 | Needs a composite database | yes | no — any two connections |
-| Proxy nodes in the data database | required for path grants | required for path grants |
+| Proxy nodes in the data database | required | required |
 
 The engine **refuses to start** rather than degrading quietly: an anchor, a tool
 referencing `caller`, or a grant that cannot be cut safely all fail at load with
@@ -368,6 +368,34 @@ EXISTS { MATCH (cut:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(o)
 A grant with no group hop cuts at the caller instead, which is how authorship
 survives — `(caller)-[:LOGGED]->(resource)` becomes a match on the `User` proxy
 by `principalId`.
+
+**Anchors split by the same rule**, because an anchor is also a traversal from
+the caller. That matters more than it sounds: anchoring is the largest
+performance lever in the engine, and losing it would have put a separated
+deployment back into scan-and-filter. Measured on 100,000 trades where the caller
+is entitled to 1,000 ([`scripts/bench_separation.py`](../scripts/bench_separation.py),
+Neo4j 2025.10.1) — every variant returns the identical answer:
+
+| Composition | p50 | db hits |
+| --- | --- | --- |
+| co-located, scan + ACL | 76.9 ms | 304,018 |
+| co-located, scan + path | 98.4 ms | 1,999,518 |
+| **co-located, anchored + path** | **4.4 ms** | 22,540 |
+| split, scan + split-path | 68.7 ms | 1,302,001 |
+| **split, anchored-split** | **4.7 ms** | 17,008 |
+| **split, anchored + ACL** | **3.1 ms** | 9,008 |
+
+Two things worth noting. The anchor is worth roughly **17x on either side of the
+split** — the benefit comes from starting at a small known set rather than
+scanning, and that set can be derived from a *value* (group names) just as well
+as from a node. And the split forms are not slower than their co-located
+equivalents; the split grant is marginally **cheaper**, because its data-side
+half starts at the row and tests a name against a short list instead of expanding
+from the caller on every row.
+
+Unanchored, both topologies sit at 70–100 ms on this dataset and would grow with
+it. That is the number to quote when anchoring is not available — not the cost of
+separating identity.
 
 **The only difference between E and F** is where `authz` comes from. Under
 composite it is bound in-statement and the filter runs inside the `USE` block —
@@ -452,7 +480,7 @@ NEO4J_DATABASE=fed ACTIVE_BUNDLE=client_platform_split \
   uv run python scripts/check_entitlements.py
 ```
 
-Expect **13 passed, 0 failed**. The engine composes one statement: the prelude
+Expect **16 passed, 0 failed**. The engine composes one statement: the prelude
 resolves the caller under `USE fed.identity`, and the tool's match, the
 entitlement filter and the split path grants all run under `USE fed.data`.
 **One statement, one transaction, two databases** — so unlike F there is no
@@ -489,7 +517,7 @@ IDENTITY_NEO4J_DATABASE=neo4j
 ACTIVE_BUNDLE=client_platform_split uv run python scripts/check_entitlements.py
 ```
 
-Expect **13 passed, 0 failed** again — same cases, same results, no composite
+Expect **16 passed, 0 failed** again — same cases, same results, no composite
 database involved.
 
 F is the most independent identity store available here: a different instance, a
@@ -650,6 +678,7 @@ when someone leaves the desk.
 | Why can they see it? | `explain-access` snippet in topology A |
 | Do derived grants match the lists? | the `differential: true` case in `entitlement_tests.yaml` |
 | What does mediation cost? | `uv run python scripts/bench_mediation.py client_platform` |
+| What does separating identity cost at scale? | `uv run python scripts/bench_separation.py --database benchdb` |
 | What does separating identity cost? | run the same suite under `client_platform` and `client_platform_split` — they should agree |
 | What do native controls cost? | `uv run python scripts/bench_native_controls.py` (Enterprise/Business Critical) |
 

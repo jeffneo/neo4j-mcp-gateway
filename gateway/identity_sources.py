@@ -36,17 +36,33 @@ under ``remote`` it arrives as a query parameter. The emitted predicate is
 otherwise identical, and the conformance suite asserts all three topologies
 return the same rows for the same callers.
 
+Anchoring splits the same way, for the same reason: an anchor is also a
+traversal from the caller. Measured on 100,000 trades at 1% visibility
+(scripts/bench_separation.py, Neo4j 2025.10.1):
+
+    co-located    scan + ACL           76.9 ms      304,018 db hits
+    co-located    scan + path          98.4 ms    1,999,518
+    co-located    anchored + path       4.4 ms       22,540
+    split         scan + split-path    68.7 ms    1,302,001
+    split         anchored-split        4.7 ms       17,008
+    split         anchored + ACL        3.1 ms        9,008
+
+Identical answers from every variant. The anchor is worth ~17x either side of
+the split, and the split forms are not slower than their co-located equivalents —
+splitting the grant is marginally CHEAPER, because the data-side half starts at
+the row and tests a name against a small list rather than expanding from the
+caller on every row.
+
 What separation actually costs:
 
-1. **Replication surface.** Every node a grant passes through needs a proxy in
-   the data database, and the data-side relationships must live there
+1. **Replication surface.** Every node a grant or anchor passes through needs a
+   proxy in the data database, and the data-side relationships must live there
    (``COVERED_BY``, ``LOGGED``). Membership stays in the identity store — the
    high-churn half, the part that changes when someone moves desks.
-2. **No anchoring.** An anchor is declared on a tool as a pattern from
-   ``caller``, and tools get no caller binding under a separated source. The
-   grant-splitting mechanism would apply, but the plumbing is not built.
-3. **No tools scoping to ``caller``.** Same reason; express it with a parameter.
-4. **Reference data must be local.** The filter runs in the data database, so
+2. **No tools scoping to ``caller``.** Tools get no caller binding, so "the
+   clients I cover" must be expressed with an anchor or a parameter rather than
+   by referencing ``caller`` in the match.
+3. **Reference data must be local.** The filter runs in the data database, so
    anything it reads — ACLs, tenant ids — has to be there.
 
 ``remote`` additionally has two round trips and a consistency window: principals
@@ -55,8 +71,8 @@ statement and one transaction, so it has neither. That, plus the fact that
 ``remote`` needs no composite database, is the whole difference between them.
 
 What survives in all three sources: per-caller row filtering, path grants,
-aggregates computed after filtering, provenance via ``explain-access``, the
-curated-tool posture, and the conformance harness.
+anchoring, aggregates computed after filtering, provenance via
+``explain-access``, the curated-tool posture, and the conformance harness.
 """
 
 from __future__ import annotations
