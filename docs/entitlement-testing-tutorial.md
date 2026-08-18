@@ -37,7 +37,7 @@ relationship. That is what makes the separated topologies below possible, so loa
 | **B** | one graph, distinct subgraphs joined at defined seams | 1 | ✅ | ✅ |
 | **C** | two business domains, **each with its own copy of identity** | 2 | ✅ | ✅ |
 | **D** | identity in one database, the data in another, **naively** | 2 | ❌ | — |
-| **E** | same split, joined by a **composite database** | 1–2 | ✅ | ❌ |
+| **E** | same split, joined by a **composite database** | 1–2 | ✅ | ⚠️ possible, engine not there yet |
 | **F** | same split, identity resolved over a **second connection** | 2 | ✅ | ❌ |
 
 A and B are the same physically and differ in modelling discipline; B is what you
@@ -45,8 +45,10 @@ would actually govern. C is the multi-bundle setup.
 
 **D, E and F are the same physical arrangement with three different answers.**
 D is what happens if you split identity from data and change nothing else — it
-fails. E and F are the two supported ways to make that split work, and both cost
-you the same thing: path grants and anchoring. Read D first; it explains why.
+fails. E and F are the two supported ways to make that split work. F genuinely
+gives up path grants and anchoring. E does **not have to** — see
+[what E can recover](#what-e-can-recover-proxy-nodes) — though the engine does
+not yet compose the query that way. Read D first; it explains why.
 
 ### C and D are not "one instance vs two" — read this before skipping
 
@@ -84,7 +86,10 @@ The distinction is worth being precise about in an architecture conversation,
 because "put identity in its own database" sounds like good hygiene and is the
 one arrangement that does not work on its own. The fix is **replication** (C), or
 declaring a separated identity source so the engine composes the query
-differently (**E** and **F**) — at the cost of path grants and anchoring.
+differently (**E** and **F**). Note that E's split still requires replicating the
+*seam nodes* into the data constituent — see
+[what E can recover](#what-e-can-recover-proxy-nodes) — so "no duplication" is
+never actually on the menu.
 
 ---
 
@@ -309,33 +314,86 @@ You have four options:
 
 ### What options 2 and 3 cost you
 
-Both are supported by the engine, and both give up the same three things. This is
-not an implementation gap — it follows from one fact:
+Both give up the caller **node** in the data query:
 
-> The caller node is in the identity database. **It cannot reach the data query.**
+> A composite database refuses to import an entity across a `USE` boundary
+> (`22N16`), and a second connection has no caller node in the data database
+> at all.
 
-A composite database says so explicitly if you try
-(`22N16: Importing entity values to a graph with a USE clause is not supported`),
-and a second connection has no caller node in the data database at all.
-Therefore:
-
-| | Kept | Lost |
+| | Composite (E) | Remote (F) |
 | --- | --- | --- |
-| Per-caller row filtering | ✅ | |
-| Aggregates computed after filtering | ✅ | |
-| Curated-only posture, conformance harness, `explain-access` | ✅ | |
-| **Path grants** (`grant_model: path` / `both`) | | ❌ entitlements must be materialised as ACLs |
-| **Anchoring** | | ❌ the 20× performance lever is gone; scan-and-filter only |
-| Tools that scope to the caller ("the clients I cover") | | ❌ must be expressed with a parameter |
+| Per-caller row filtering | ✅ | ✅ |
+| Aggregates computed after filtering | ✅ | ✅ |
+| Curated-only posture, harness, `explain-access` | ✅ | ✅ |
+| One statement, one transaction | ✅ | ❌ two round trips, consistency window |
+| **Path grants** | ⚠️ possible via proxy nodes — engine not there yet | ❌ genuinely unavailable |
+| **Anchoring** | ⚠️ same | ❌ |
+| Tools scoping to `caller` | ❌ must use a parameter | ❌ |
 
 The engine **refuses to start** rather than degrading quietly: a bundle declaring
 a separated source with path grants, an anchor, or a tool referencing `caller`
-fails at load with a message saying why.
+fails at load with a message saying why. For composite that restriction is
+currently stricter than the database requires.
 
-That trade is the whole argument in one line: **separating identity from data
-costs you exactly the capabilities that come from identity being a graph next to
-the data.** What you get back is independent lifecycle, independent credentials,
-and an identity store that many domains can share.
+### What E can recover: proxy nodes
+
+A *relationship* cannot span two graphs. A *traversal* can still be split at a
+node that exists in both — the documented
+[proxy node pattern](https://neo4j.com/docs/operations-manual/current/scalability/composite-databases/concepts/):
+one label present in both constituents, carrying full data in one and only its
+identifier in the other.
+
+Our grant already passes through such a node:
+
+```
+(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)
+└──── resolve in fed.identity ────┘ └────────── traverse in fed.data ──────────┘
+                        ^ AdGroup exists in BOTH; the group NAME crosses as a value
+```
+
+Verified working on 2025.10.1 — a real query-time traversal in the data
+constituent, not a materialised ACL:
+
+```cypher
+CALL { USE fed.identity
+       MATCH (u:User {email:$p})-[:MEMBER_OF*1..]->(g:AdGroup)
+       RETURN collect(DISTINCT g.name) AS groups }
+CALL { USE fed.data
+       WITH groups
+       MATCH (o:Opportunity)
+       WHERE EXISTS { MATCH (o)-[:FOR_CLIENT]->(:Client)-[:COVERED_BY]->(g2:AdGroup)
+                      WHERE g2.name IN groups }
+       RETURN o }
+RETURN collect(o.id), sum(o.value);
+```
+
+```
+lena.fischer   ["OPP-1","OPP-3"]  520000.0
+evan.brooks    ["OPP-2"]          120000.0
+nadia.haddad   []                 0
+```
+
+Caller-direct grants work the same way through a `User` proxy holding only the
+email (`EXISTS { MATCH (:User {email: callerId})-[:LOGGED]->(i) }`), and so does
+anchoring — traverse *from* the group node inward rather than scanning.
+
+**What it costs is replication surface.** Every node a grant passes through needs
+a proxy in the data constituent, and the data-side relationships must live there:
+`AdGroup` stubs plus `COVERED_BY`, `User` stubs plus `LOGGED`. What stays behind
+in the identity database is people, groups and `MEMBER_OF` — which is the
+high-churn part, the part that changes when someone moves desks. Arguably a
+sound division: *who covers this client* is a fact about the client.
+
+**Why the engine doesn't do this yet.** The filter would have to move inside the
+`USE` block. The outer composite query rejects every graph access —
+
+```
+42NA1: Graph access operations are not supported on composite databases.
+42NA0: Query contains operations that must be executed on the constituent.
+```
+
+— while property reads on exported entities are allowed, which is exactly why
+today's outer-query filter works for the property model and only for it.
 
 ---
 

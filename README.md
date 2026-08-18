@@ -170,18 +170,21 @@ security:
 ```
 
 `composite` and `remote` make the identity store independent — its own instance,
-credentials and lifecycle, shareable across domains. Both cost the same three
-things, because the caller node cannot reach the data query:
+credentials and lifecycle, shareable across domains. Both give up the caller
+*node* in the data query, so both currently require `grant_model: property` and
+forbid anchoring and tools that reference `caller`. The engine **refuses to
+start** rather than degrading quietly.
 
-| Kept | Lost |
-| --- | --- |
-| per-caller row filtering, post-filter aggregates, curated-only posture, conformance harness, `explain-access` | **path grants** (`grant_model` must be `property`), **anchoring**, and tools that scope to `caller` |
+For `remote` that is inherent. For `composite` it is an **engine limitation, not
+a database one**: a relationship cannot span two graphs, but a traversal can be
+split at a node present in both — Neo4j's documented *proxy node* pattern — and
+path grants and anchoring both work that way. Supporting it means moving the
+filter inside the `USE` block, because the outer composite query rejects all
+graph access. See SEPARATION_TRADEOFFS in
+[`gateway/identity_sources.py`](gateway/identity_sources.py) and the tutorial.
 
-The engine **refuses to start** rather than degrading quietly: a separated bundle
-declaring path grants, an anchor, or a tool referencing `caller` fails at load
-with a message saying why. Adding another source (an external entitlement
-service, LDAP, token introspection) means implementing `IdentitySource` and
-registering it — see [`gateway/identity_sources.py`](gateway/identity_sources.py).
+Adding another source (an external entitlement service, LDAP, token
+introspection) means implementing `IdentitySource` and registering it.
 
 Want to try the entitlement model on Aura?
 [`docs/entitlement-testing-tutorial.md`](docs/entitlement-testing-tutorial.md)

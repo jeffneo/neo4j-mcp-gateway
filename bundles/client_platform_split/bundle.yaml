@@ -27,10 +27,13 @@ security:
   permissions_property: "Permissions.Read"
   protected_labels: [Interaction, Opportunity, UsageSummary]
 
-  # Property model is REQUIRED here, and the engine enforces it. A path grant is
-  # a traversal from the caller into the data; with identity in another database
-  # there is no caller node to traverse from. See SEPARATION_TRADEOFFS in
-  # gateway/identity_sources.py.
+  # Property model is REQUIRED here and the engine enforces it, because a path
+  # grant is a traversal from the caller and no caller node reaches the data
+  # query. Under `remote` that is inherent. Under `composite` it is an ENGINE
+  # limitation rather than a database one — the proxy-node pattern can split the
+  # traversal at a node present in both constituents, verified working, but the
+  # engine would have to compose the filter inside the USE block to emit it.
+  # See SEPARATION_TRADEOFFS in gateway/identity_sources.py.
   grant_model: property
 
   resource_keys:
