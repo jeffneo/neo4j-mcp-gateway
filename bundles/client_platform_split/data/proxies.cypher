@@ -6,7 +6,11 @@
 //  evaluated when identity lives in a different database: the traversal is cut
 //  at a node present on both sides, and the identifier crosses as a value.
 //
-//  Load order, into the DATA constituent:
+//  Needed by BOTH separated topologies — composite (identity.source: composite)
+//  and a second connection (identity.source: remote). The cut is the same; only
+//  the way the caller's principals reach this database differs.
+//
+//  Load order, into the DATA database:
 //    1. platform.cypher   (from ../../client_platform/data/)
 //    2. this file
 //  and load identity.cypher into the IDENTITY constituent.

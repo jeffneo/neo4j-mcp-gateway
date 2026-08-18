@@ -308,7 +308,7 @@ def grant_test(policy: SecurityPolicy, via: str, var: str) -> str:
     GRANT_SPLITTING. Same semantics, same answer; only the starting point moves
     from the caller NODE to a caller-derived VALUE.
     """
-    if policy.identity.source != SOURCE_COMPOSITE:
+    if policy.identity.source == SOURCE_GRAPH:
         return f"EXISTS {{ MATCH {_bind(via, var)} }}"
     pattern, predicate = split_grant(policy, via)
     return f"EXISTS {{ MATCH {_bind(pattern, var)} WHERE {predicate} }}"
@@ -720,33 +720,32 @@ def explain_query(policy: SecurityPolicy, label: str, key_property: str) -> str:
     # reported — each one is a data-side traversal — so provenance survives; the
     # matched path is not rendered because the identity-side prefix is not walked.
     if not binds_caller(policy):
-        if policy.identity.source == SOURCE_COMPOSITE:
-            arms = [
-                f"      CASE WHEN {grant_test(policy, g.via, 'resource')} THEN {i} ELSE null END"
-                for i, g in enumerate(policy.grants) if g.label == label
-            ]
-            matched = (
-                "[x IN [\n" + ",\n".join(arms)
-                + "\n    ] WHERE x IS NOT NULL | {idx: x, nodes: [], rels: []}]"
-            ) if arms else "[]"
-            return _subst(f"""{prelude_for(policy)}
-CALL {{
-  USE {policy.identity.data_graph}
-  WITH authz
-  MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
+        # Split grants are reported the same way for both separated sources — each
+        # one is a data-side traversal, so provenance survives. The matched PATH is
+        # not rendered, because the identity-side prefix was resolved elsewhere and
+        # is not walked here.
+        arms = [
+            f"      CASE WHEN {grant_test(policy, g.via, 'resource')} THEN {i} ELSE null END"
+            for i, g in enumerate(policy.grants) if g.label == label
+        ]
+        matched = (
+            "[x IN [\n" + ",\n".join(arms)
+            + "\n    ] WHERE x IS NOT NULL | {idx: x, nodes: [], rels: []}]"
+        ) if arms else "[]"
+        lookup = f"""  MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
   RETURN resource,
     {matched} AS matched,
     [x IN coalesce(resource.`@@PERM_PROP@@`, [])
-       WHERE x IN authz.authzPrincipals] AS aclMatches
+       WHERE x IN authz.authzPrincipals] AS aclMatches"""
+        # The subquery must import authz explicitly — the grant tests reference it.
+        use = (f"  USE {policy.identity.data_graph}\n"
+               if policy.identity.source == SOURCE_COMPOSITE else "")
+        return _subst(f"""{prelude_for(policy)}
+CALL {{
+{use}  WITH authz
+{lookup}
 }}
 RETURN matched, aclMatches, authz.authzPrincipals AS principals""", policy)
-        return _subst(f"""{prelude_for(policy)}
-MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
-RETURN
-  [] AS matched,
-  [x IN coalesce(resource.`@@PERM_PROP@@`, [])
-     WHERE x IN authz.authzPrincipals] AS aclMatches,
-  authz.authzPrincipals AS principals""", policy)
 
     arms = [
         f"  WITH caller, resource\n"

@@ -21,54 +21,42 @@ endpoint) means implementing :class:`IdentitySource` and calling
 
 SEPARATION_TRADEOFFS
 --------------------
-Both separated sources give up the caller NODE in the data query: a composite
-database refuses to import entity values across a ``USE`` boundary (``22N16``),
-and a remote source has no caller node in the data database at all.
+Neither separated source gives the data query a caller NODE: a composite database
+refuses to import entity values across a ``USE`` boundary (``22N16``), and a
+remote source has no caller node in the data database at all.
 
-What that costs depends on the source, and the distinction matters.
+**Path grants survive both anyway**, because a grant does not actually need the
+caller node — it needs a VALUE derived from the caller. A relationship cannot
+span two graphs, but a traversal can be CUT at a node present in both: Neo4j's
+documented **proxy node** pattern. The engine cuts each grant at the
+identity/data boundary and re-roots the data-side half at that proxy, matched
+against ``authz.authzPrincipals`` or ``authz.principalId``. See GRANT_SPLITTING
+in gateway/mediation.py. Under ``composite`` that value is bound in-statement;
+under ``remote`` it arrives as a query parameter. The emitted predicate is
+otherwise identical, and the conformance suite asserts all three topologies
+return the same rows for the same callers.
 
-**remote** — a grant is ``(caller)-[...]->(resource)``, and with the identity
-graph behind a different connection there is nothing in the data database to
-start that traversal from. Entitlements must be materialised as ACLs, which
-brings back the staleness and fan-out that path grants exist to remove.
-Anchoring is likewise unavailable. ``remote`` also reintroduces the round trip
-and a consistency window: principals are read at T0, the data query runs at T1.
+What separation actually costs:
 
-**composite** — path grants are NOT inherently lost, and an earlier version of
-this module said they were. What a relationship cannot do is span two graphs;
-a *traversal* can still be split at a node that exists in both, which is the
-documented **proxy node** pattern: a label present in both constituents, holding
-full data in one and only its identifier in the other. Verified on 2025.10.1:
+1. **Replication surface.** Every node a grant passes through needs a proxy in
+   the data database, and the data-side relationships must live there
+   (``COVERED_BY``, ``LOGGED``). Membership stays in the identity store — the
+   high-churn half, the part that changes when someone moves desks.
+2. **No anchoring.** An anchor is declared on a tool as a pattern from
+   ``caller``, and tools get no caller binding under a separated source. The
+   grant-splitting mechanism would apply, but the plumbing is not built.
+3. **No tools scoping to ``caller``.** Same reason; express it with a parameter.
+4. **Reference data must be local.** The filter runs in the data database, so
+   anything it reads — ACLs, tenant ids — has to be there.
 
-    CALL { USE fed.identity                       -- caller -> group NAMES
-           MATCH (u:User {email:$p})-[:MEMBER_OF*1..]->(g:AdGroup)
-           RETURN collect(DISTINCT g.name) AS groups }
-    CALL { USE fed.data                           -- names -> resource, a real
-           WITH groups                            -- query-time traversal
-           MATCH (o:Opportunity)
-           WHERE EXISTS { MATCH (o)-[:FOR_CLIENT]->(:Client)-[:COVERED_BY]->(g2:AdGroup)
-                          WHERE g2.name IN groups }
-           RETURN o }
+``remote`` additionally has two round trips and a consistency window: principals
+are read at T0 and the data query runs at T1. ``composite`` keeps both in one
+statement and one transaction, so it has neither. That, plus the fact that
+``remote`` needs no composite database, is the whole difference between them.
 
-Group-routed grants, caller-direct grants (via a ``User`` proxy carrying only the
-email) and anchoring all work this way. The cost is replication surface: every
-node a grant pattern passes through needs a proxy in the data constituent, and
-the data-side relationships (``COVERED_BY``, ``LOGGED``) must live there.
-
-The engine does not emit that shape yet, so ``composite`` is currently restricted
-to ``grant_model: property`` — **an engine limitation, not a database one**. The
-required change is structural: the filter must move INSIDE the ``USE`` block,
-because the outer composite query rejects all graph access
-(``42NA1: Graph access operations are not supported on composite databases``).
-Property reads on exported entities are fine there, which is why the current
-outer-query filter works for the property model and only for that.
-
-**Reference data must be local** in both cases. The filter runs in the data
-database, so anything it reads — ACLs, tenant ids — has to be there. Only the
-identity half moves.
-
-What survives in all three sources: per-caller row filtering, aggregates computed
-after filtering, the curated-tool posture, and the conformance harness.
+What survives in all three sources: per-caller row filtering, path grants,
+aggregates computed after filtering, provenance via ``explain-access``, the
+curated-tool posture, and the conformance harness.
 """
 
 from __future__ import annotations

@@ -38,16 +38,17 @@ relationship. That is what makes the separated topologies below possible, so loa
 | **C** | two business domains, **each with its own copy of identity** | 2 | ✅ | ✅ |
 | **D** | identity in one database, the data in another, **naively** | 2 | ❌ | — |
 | **E** | same split, joined by a **composite database** | 1–2 | ✅ | ✅ via proxy nodes |
-| **F** | same split, identity resolved over a **second connection** | 2 | ✅ | ❌ |
+| **F** | same split, identity resolved over a **second connection** | 2 | ✅ | ✅ via proxy nodes |
 
 A and B are the same physically and differ in modelling discipline; B is what you
 would actually govern. C is the multi-bundle setup.
 
 **D, E and F are the same physical arrangement with three different answers.**
 D is what happens if you split identity from data and change nothing else — it
-fails. E and F are the two supported ways to make that split work. **E keeps path
-grants** by cutting each traversal at a node present in both databases; F gives
-them up. Read D first; it explains why.
+fails. E and F are the two supported ways to make that split work, and **both
+keep path grants** by cutting each traversal at a node present in both databases.
+They differ only in how the caller's principals reach the data query. Read D
+first; it explains why the naive split fails.
 
 ### C and D are not "one instance vs two" — read this before skipping
 
@@ -87,7 +88,7 @@ one arrangement that does not work on its own. The fix is **replication** (C), o
 declaring a separated identity source so the engine composes the query
 differently (**E** and **F**). Note that E's split still requires replicating the
 *seam nodes* into the data constituent — see
-[how E keeps path grants](#how-e-keeps-path-grants-proxy-nodes) — so "no duplication" is
+[how they keep path grants](#how-e-and-f-keep-path-grants-proxy-nodes) — so "no duplication" is
 never actually on the menu.
 
 ---
@@ -325,16 +326,17 @@ Both give up the caller **node** in the data query:
 | Aggregates computed after filtering | ✅ | ✅ |
 | Curated-only posture, harness, `explain-access` | ✅ | ✅ |
 | One statement, one transaction | ✅ | ❌ two round trips, consistency window |
-| **Path grants** | ✅ kept, via proxy nodes | ❌ `grant_model: property` only |
+| **Path grants** | ✅ via proxy nodes | ✅ via proxy nodes |
 | **Anchoring** | ❌ | ❌ |
 | Tools scoping to `caller` | ❌ must use a parameter | ❌ |
-| Extra requirement | proxy nodes in the data constituent | none |
+| Needs a composite database | yes | no — any two connections |
+| Proxy nodes in the data database | required for path grants | required for path grants |
 
 The engine **refuses to start** rather than degrading quietly: an anchor, a tool
-referencing `caller`, path grants under `remote`, or a grant that cannot be cut
-safely all fail at load with a message saying why.
+referencing `caller`, or a grant that cannot be cut safely all fail at load with
+a message saying why.
 
-### How E keeps path grants: proxy nodes
+### How E and F keep path grants: proxy nodes
 
 A *relationship* cannot span two graphs. A *traversal* can still be split at a
 node that exists in both — the documented
@@ -367,15 +369,13 @@ A grant with no group hop cuts at the caller instead, which is how authorship
 survives — `(caller)-[:LOGGED]->(resource)` becomes a match on the `User` proxy
 by `principalId`.
 
-**The filter runs inside the `USE` block** for this source, because the outer
-composite query rejects every graph access:
-
-```
-42NA1: Graph access operations are not supported on composite databases.
-```
-
-Filtering there is also strictly better — rows are discarded before they cross
-the boundary.
+**The only difference between E and F** is where `authz` comes from. Under
+composite it is bound in-statement and the filter runs inside the `USE` block —
+required, because the outer composite query rejects every graph access
+(`42NA1: Graph access operations are not supported on composite databases`) and
+a path grant *is* graph access. Under remote the same predicate runs as ordinary
+Cypher with `authz` supplied as a parameter. The emitted grant test is otherwise
+byte-identical.
 
 **What it costs is replication surface.** Every node a grant passes through needs
 a proxy in the data constituent, and the data-side relationships must live there.
@@ -404,8 +404,9 @@ engine rejects such a grant at load rather than composing it.
 ## Topologies E and F — the split, made to work
 
 Both use the **`client_platform_split`** bundle: the same client platform as
-above, with `grant_model: property` and the identity graph elsewhere. It ships
-configured for E; switching to F is two lines in `bundle.yaml`.
+above, the same four grant patterns, with the identity graph in a different
+database. It ships configured for E; switching to F is two lines in
+`bundle.yaml` and nothing else.
 
 Load the halves into two databases — the data side also gets the proxy nodes. On
 self-managed Enterprise (or AuraDB Business Critical / Virtual Dedicated Cloud,
@@ -467,10 +468,9 @@ identity:
   remote_env_prefix: IDENTITY
 ```
 
-You must also set `grant_model: property` and remove the `grants:` block — a
-remote source has no proxy in the data database to re-root a traversal at, and
-the engine refuses to start otherwise. That is the concrete difference between
-E and F, enforced rather than documented.
+Keep `grant_model: both` and the `grants:` block exactly as they are — the same
+patterns are cut the same way. What changes is only that the caller's principals
+arrive as a query parameter instead of being resolved in-statement.
 
 The identity connection comes from the environment, never from the manifest —
 same rule as every other connection here:
@@ -489,15 +489,15 @@ IDENTITY_NEO4J_DATABASE=neo4j
 ACTIVE_BUNDLE=client_platform_split uv run python scripts/check_entitlements.py
 ```
 
-The ACL-derived cases pass; the authorship case fails, because without a
-traversal into the data constituent `nadia` loses `INT-2006`. That is the honest
-difference between E and F, and the reason to prefer E when you can run a
-composite database.
+Expect **13 passed, 0 failed** again — same cases, same results, no composite
+database involved.
 
-What F buys instead is the most independent identity store available here — a
-different instance, a different region, its own credentials, its own lifecycle,
-and no proxy nodes to maintain. It is also the extension point for an
-**external** entitlement service: implement `IdentitySource` in
+F is the most independent identity store available here: a different instance, a
+different region, its own credentials, its own lifecycle, and no composite
+database to administer. The costs are two round trips and a consistency window,
+since principals are read at T0 and the data query runs at T1. It is also the
+extension point for an **external** entitlement service: implement
+`IdentitySource` in
 [`gateway/identity_sources.py`](../gateway/identity_sources.py), register it, and
 the rest of the engine is unchanged.
 
@@ -533,18 +533,18 @@ EOF
 ```
 
 ```
-client_platform         nadia  granted=True   ['logged this interaction']
-                        sofia  granted=True   ['covers the client this interaction was with']
+co-located / composite / remote — all three identical:
 
-client_platform_split   nadia  granted=True   ['logged this interaction']
-                        sofia  granted=True   ['covers the client this interaction was with']
-                        evan   granted=False  []
+  nadia.haddad   granted=True   ['logged this interaction']
+  sofia.rossi    granted=True   ['covers the client this interaction was with']
+  evan.brooks    granted=False  []
 ```
 
-Identical answers, identical reasons, two different topologies. The suite goes
-further and compares whole result sets: **24 comparisons across three record
-types and eight callers, zero divergence.** The grant patterns are authored once
-and mean the same thing on either side of the split.
+Identical answers and identical reasons in all three topologies. Measured beyond
+the suite, comparing whole result sets across three record types and eight
+callers: **24 comparisons co-located vs composite, 24 co-located vs remote, zero
+divergence.** The grant patterns are authored once and mean the same thing
+wherever identity lives.
 
 ---
 

@@ -33,9 +33,9 @@ security:
   # see GRANT_SPLITTING in gateway/mediation.py. The patterns are authored once
   # and mean the same thing in both topologies.
   #
-  # Switching this bundle to `source: remote` below therefore requires removing
-  # the grants and setting grant_model: property, because a remote source has no
-  # proxy in the data database to re-root at. The engine says so at load.
+  # Switching this bundle to `source: remote` below changes nothing here: the
+  # same cut applies, and the only difference is that the caller's principals
+  # arrive as a query parameter rather than being resolved in the same statement.
   grant_model: both
   grants:
     - label: Interaction
@@ -63,9 +63,10 @@ security:
     data_graph: fed.data
     #
     # ---- Topology F: remote connection (two round trips, two instances) ------
-    # Comment out the three lines above and uncomment this one. The connection
-    # then comes from IDENTITY_NEO4J_URI / _USERNAME / _PASSWORD / _DATABASE in a
-    # git-ignored .env — never from this file.
+    # Comment out the three lines above and uncomment these two. No composite
+    # database needed; the identity store can be any reachable Neo4j. The
+    # connection comes from IDENTITY_NEO4J_URI / _USERNAME / _PASSWORD /
+    # _DATABASE in a git-ignored .env — never from this file.
     # source: remote
     # remote_env_prefix: IDENTITY
 

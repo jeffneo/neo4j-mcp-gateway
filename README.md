@@ -173,22 +173,25 @@ security:
 credentials and lifecycle, shareable across domains. Neither gives the data query
 a caller *node*, so both forbid anchoring and tools that reference `caller`.
 
-They differ on **path grants**:
+**Path grants survive both**, because a grant does not need the caller *node* —
+it needs a value derived from the caller. A relationship cannot span two
+databases, but a *traversal* can be cut at a node present in both: Neo4j's
+documented **proxy node** pattern. The engine finds that cut itself and re-roots
+the data-side half at the proxy, so patterns are authored once and mean the same
+thing co-located or split. A grant that cannot be cut safely — an identity
+relationship appearing after the boundary, which would deny silently — is
+rejected at load. See GRANT_SPLITTING in
+[`gateway/mediation.py`](gateway/mediation.py).
 
 | | `composite` | `remote` |
 | --- | --- | --- |
-| Path grants (`grant_model: path` / `both`) | ✅ kept | ❌ `property` only |
+| Path grants (`grant_model: path` / `both`) | ✅ | ✅ |
 | Round trips | 1 (one statement, one transaction) | 2, with a consistency window |
-| Extra requirement | proxy nodes in the data constituent | none |
+| Needs a composite database | yes | no — any two connections |
+| Proxy nodes in the data database | required for path grants | required for path grants |
 
-A relationship cannot span two graphs, but a *traversal* can be cut at a node
-present in both — Neo4j's documented **proxy node** pattern. Under `composite`
-the engine cuts each grant at the identity/data boundary automatically and
-re-roots the data-side half at the proxy, so patterns are authored once and mean
-the same thing co-located or split. A grant that cannot be cut safely (an
-identity relationship appearing after the boundary, which would deny silently)
-is rejected at load. See GRANT_SPLITTING in
-[`gateway/mediation.py`](gateway/mediation.py).
+Both give up **anchoring** and tools that reference `caller`, since neither binds
+a caller node for tool authors to traverse from.
 
 Adding another source (an external entitlement service, LDAP, token
 introspection) means implementing `IdentitySource` and registering it — see
