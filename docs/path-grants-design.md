@@ -291,9 +291,35 @@ smaller ratio than one that aggregates. Quote the shape along with the number �
 the isolated composition measured 20–33×, and a row-returning tool will not
 reach that.
 
-**Build next:** `grant_model` config, path filter semantics, `both` mode, and
-differential validation in the conformance harness — for materialisation,
-staleness and provenance rather than speed.
+**Built.** `grant_model` (`property` | `path` | `both`), grants declared per
+label as caller-to-resource patterns with a reason, and `differential: true`
+cases in the conformance harness.
+
+Two things the implementation established that the design had wrong or unstated:
+
+- **A permissive default cannot be OR-ed with a restrictive one.** The first cut
+  treated a label with no declared grant as ungoverned reference data. Under
+  `both` that default OR-ed away the property model's restriction entirely, and
+  `Deal` and `Request` — governed by ACLs but carrying no path grants — became
+  readable by everyone. The conformance harness caught it as a LEAK. Governance is
+  now decided by `protected_labels` ∪ granted labels, so governed-but-ungranted is
+  **denied**.
+- **Pure `path` is not a complete model for this data, by construction.** Role
+  based routes ("supervision reads everything", "the owning desk reads its
+  trades") are not statements about a path from the caller to the row, so they
+  cannot be expressed as grants. Measured against the same 22 cases:
+
+  | grant_model | result |
+  | --- | --- |
+  | `property` | 22 pass |
+  | `path` | 17 pass, 5 fail — **all under-permissive, zero leaks** |
+  | `both` | 22 pass |
+
+  This makes `both` the steady state rather than a staging post: relationship
+  derived entitlements are naturally paths, role-based ones are naturally ACLs,
+  and a real model contains some of each. Grants are therefore required to bind
+  `resource`, and that rule is enforced at load — a "grant" that ignores the row
+  is a role rule and belongs in the property model.
 
 **Build after that:** `explain-access`, which needs declarative grants.
 

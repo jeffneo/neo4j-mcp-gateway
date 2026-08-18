@@ -43,6 +43,21 @@ security:
   # business record would flow as reference data (fail open).
   protected_labels: [Communication, Request, Trade, Deal]
 
+  # How readability is decided. 'both' is the steady state here, not a staging
+  # post: relationship-derived entitlements are naturally paths, while
+  # role-based ones ("supervision reads everything") are naturally list ACLs.
+  grant_model: both
+  grants:
+    - label: Trade
+      via: "(caller)-[:BOOKED]->(resource)"
+      reason: "booked the trade"
+    - label: Trade
+      via: "(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)"
+      reason: "covers the client the trade was booked for"
+    - label: Communication
+      via: "(caller)-[:PARTICIPANT_IN]->(resource)"
+      reason: "was a participant in the conversation"
+
 downstream:
   read_only: true   # official server never registers write-cypher
   # NOTE: raw read-cypher is hidden AUTOMATICALLY because security.mode is

@@ -38,6 +38,7 @@ tests the filter itself rather than the impersonation gate.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -119,6 +120,39 @@ def _resolve_query(case: dict, specs: dict, policy) -> tuple[str, dict]:
     return query, dict(case.get("args") or {})
 
 
+def _differential(executor, case, specs, policy, principals, id_field) -> list[str]:
+    """Assert derived grants reproduce the materialised ACLs, row for row.
+
+    This is the migration argument made checkable: rather than asking anyone to
+    trust a new grant model, run the same question under the ACL model and under
+    the configured one and prove they agree.
+    """
+    if not case.get("differential"):
+        return []
+    baseline = dataclasses.replace(policy, grant_model="property")
+    failures: list[str] = []
+    for candidate_model in ("path", policy.grant_model):
+        if candidate_model == "property":
+            continue
+        candidate = dataclasses.replace(policy, grant_model=candidate_model)
+        for principal in principals:
+            base_q, base_args = _resolve_query(case, specs, baseline)
+            cand_q, cand_args = _resolve_query(case, specs, candidate)
+            base = sorted(map(str, _seen(executor, baseline, base_q, base_args, principal, id_field)))
+            cand = sorted(map(str, _seen(executor, candidate, cand_q, cand_args, principal, id_field)))
+            if base != cand:
+                only_acl = sorted(set(base) - set(cand))
+                only_new = sorted(set(cand) - set(base))
+                detail = []
+                if only_acl:
+                    detail.append(f"only the ACL model grants {only_acl}")
+                if only_new:
+                    detail.append(f"only '{candidate_model}' grants {only_new}")
+                failures.append(
+                    f"DIVERGENCE ({candidate_model} vs property) for {principal}: " + "; ".join(detail))
+    return failures
+
+
 def _seen(executor, policy, query: str, args: dict, principal: str, id_field: str) -> list:
     params = {**args, **mediation.security_params(policy, principal)}
     rows = executor.run(query, params, read_only=True)
@@ -159,9 +193,12 @@ def run_case(executor, policy, specs: dict, case: dict, verbose: bool) -> tuple[
 
     query, args = _resolve_query(case, specs, policy)
     anchored_pair = _anchored_pair(case, specs, policy)
-    principals = case.get("same_for") or ([case["principal"]] if case.get("principal") else [])
+    # 'same_for' additionally asserts the principals see the SAME rows;
+    # 'principals' just runs the case for each of them.
+    principals = (case.get("same_for") or case.get("principals")
+                  or ([case["principal"]] if case.get("principal") else []))
     if not principals:
-        raise CaseError(f"{name}: needs 'principal' or 'same_for'")
+        raise CaseError(f"{name}: needs 'principal', 'principals' or 'same_for'")
 
     failures: list[str] = []
     results: dict[str, list] = {}
@@ -186,6 +223,8 @@ def run_case(executor, policy, specs: dict, case: dict, verbose: bool) -> tuple[
                 failures.append("ANCHOR MISMATCH: " + "; ".join(detail))
         if verbose:
             print(f"      {principal:28} -> {seen}")
+
+    failures.extend(_differential(executor, case, specs, policy, principals, id_field))
 
     # same_for: every principal must get an identical result set.
     if case.get("same_for"):

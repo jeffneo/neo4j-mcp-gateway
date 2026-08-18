@@ -194,3 +194,26 @@ cases:
     same_for: [anna.ross@bank.com, joe.hart@bank.com, sam.diaz@bank.com]
     tool: covered_client_trades
     id_field: tradeId
+
+  # ---------------------------------------------------------------------------
+  # Differential validation. `differential: true` runs the same question under the
+  # materialised ACL model and under the configured grant model and fails on any
+  # divergence — the migration argument, made checkable. It also reports where
+  # pure `path` would diverge, which is how you find entitlement routes that are
+  # role-based rather than relationship-derived.
+  # ---------------------------------------------------------------------------
+  - name: derived grants agree with materialised ACLs on client trades
+    differential: true
+    principals: [anna.ross@bank.com, joe.hart@bank.com, priya.natarajan@bank.com]
+    tool: client_activity
+    args: {client: Acme Corp}
+    id_field: tradeId
+
+  - name: derived grants agree with materialised ACLs on communications
+    differential: true
+    principals: [anna.ross@bank.com, joe.hart@bank.com]
+    match: |
+      MATCH (x:Communication)-[:WITH_CLIENT]->(:Client {name: 'Acme Corp'})
+    scope: [x]
+    return: "RETURN x.commId AS id"
+    id_field: id

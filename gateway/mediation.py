@@ -82,22 +82,77 @@ _PRELUDE = """CALL {
   } AS authz, u AS caller
 }"""
 
-# (a) explicitly protected -> STRICT: must carry an ACL and match.
-# (b) everything else in scope -> DERIVED: match if it has an ACL; flow if it does
-#     not (reference data). This is what makes filtering independent of the caller.
-_FILTER = """WITH @@SCOPE_WITH@@
-WHERE all(resource IN [@@PROTECTED@@] WHERE resource IS NULL OR (
-    (authz.tenantId IS NULL OR resource.tenantId IS NULL OR resource.tenantId = authz.tenantId)
-    AND any(principal IN coalesce(resource[$@@P_PERM_PROP@@], [])
-            WHERE principal IN authz.authzPrincipals)
-  ))
-  AND all(resource IN [@@DERIVED@@] WHERE resource IS NULL
-    OR resource[$@@P_PERM_PROP@@] IS NULL
-    OR (
-      (authz.tenantId IS NULL OR resource.tenantId IS NULL OR resource.tenantId = authz.tenantId)
-      AND any(principal IN resource[$@@P_PERM_PROP@@]
-              WHERE principal IN authz.authzPrincipals)
-    ))"""
+# The entitlement test for ONE variable. Built per variable rather than as a list
+# comprehension because path grants dispatch on the variable's labels.
+#
+#   strict  (named in `protect`) — must be explicitly granted; ungoverned denied.
+#   derived (everything else in scope) — granted if governed, otherwise flows as
+#           reference data so joins through Clients, teams and desks still work.
+_TENANT = ("(authz.tenantId IS NULL OR {v}.tenantId IS NULL "
+           "OR {v}.tenantId = authz.tenantId)")
+
+
+def _property_test(var: str, strict: bool) -> str:
+    tenant = _TENANT.format(v=var)
+    matches = (f"any(principal IN coalesce({var}[${P_PERM_PROP}], []) "
+               f"WHERE principal IN authz.authzPrincipals)")
+    if strict:
+        return f"({var} IS NULL OR ({tenant} AND {matches}))"
+    return (f"({var} IS NULL OR {var}[${P_PERM_PROP}] IS NULL "
+            f"OR ({tenant} AND {matches}))")
+
+
+def _bind(pattern: str, var: str) -> str:
+    """Point a grant pattern's `resource` at the variable being tested."""
+    return re.sub(r"\bresource\b", var, pattern.strip())
+
+
+def _path_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
+    """Grant test for one variable.
+
+    A label counts as GOVERNED if it is named in `protected_labels` or has a
+    grant. Governed-but-ungranted must therefore be DENIED, not waved through as
+    reference data — otherwise a label with no grant would be readable by anyone,
+    and under `both` that permissive default would OR away the property model's
+    restriction entirely.
+    """
+    by_label: dict[str, list[str]] = {}
+    for grant in policy.grants:
+        by_label.setdefault(grant.label, []).append(
+            f"EXISTS {{ MATCH {_bind(grant.via, var)} }}")
+
+    governed = sorted(set(policy.protected_labels) | set(by_label))
+    if not governed:
+        return "true"
+
+    # Satisfying a grant declared for one of the variable's labels.
+    granted = [f"({var}:{label} AND ({' OR '.join(tests)}))"
+               for label, tests in by_label.items()]
+    granted_expr = " OR ".join(granted) if granted else "false"
+
+    if strict:
+        return f"({var} IS NULL OR {granted_expr})"
+    # Ungoverned nodes (Client, AdGroup, Desk…) still flow so joins work.
+    is_governed = " OR ".join(f"{var}:{label}" for label in governed)
+    return f"({var} IS NULL OR NOT ({is_governed}) OR {granted_expr})"
+
+
+def _variable_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
+    model = policy.grant_model
+    if model == "property":
+        return _property_test(var, strict)
+    if model == "path":
+        return _path_test(policy, var, strict)
+    # both: either route suffices.
+    return f"({_property_test(var, strict)} OR {_path_test(policy, var, strict)})"
+
+
+def build_filter(policy: SecurityPolicy, scope: list[str], protect: list[str]) -> str:
+    """The WHERE clause applied to every variable the query produces."""
+    clauses = [_variable_test(policy, v, strict=(v in protect)) for v in scope]
+    return ("WITH " + ", ".join(["authz", "caller"] + scope)
+            + "\nWHERE " + "\n  AND ".join(clauses))
+
 
 # ANCHOR_SAFETY
 # -------------
@@ -310,7 +365,6 @@ def compose(
     afterwards, so an over-broad anchor cannot leak — see ANCHOR_SAFETY below.
     """
     protect = [v for v in (protect or []) if v in scope]
-    derived = [v for v in scope if v not in protect]
 
     if anchor:
         anchor_var, anchor_pattern = anchor
@@ -329,12 +383,7 @@ def compose(
             "CALL {\n  WITH authz\n  " + match_clause.strip()
             + "\n  RETURN " + ", ".join(scope) + "\n}"
         )
-    filt = (
-        _FILTER
-        .replace("@@SCOPE_WITH@@", ", ".join(["authz", "caller"] + scope))
-        .replace("@@PROTECTED@@", ", ".join(protect))
-        .replace("@@DERIVED@@", ", ".join(derived))
-    )
+    filt = build_filter(policy, scope, protect)
     return _subst("\n".join([_PRELUDE, body, filt, final_return]), policy)
 
 
