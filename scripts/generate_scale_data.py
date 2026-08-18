@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """Generate an entitlement dataset at realistic scale.
 
-Defaults match the shape described by the prospect: ~100,000 institutional
-clients, with any one salesperson entitled to roughly 1,000 of them. That
-selectivity — a small slice of a large population — is what makes the
-entitlement filter's cost meaningful; the hand-built demo dataset is far too
-small to say anything about performance.
+Defaults model a realistic sell-side shape: ~100,000 institutional clients, with
+any one salesperson entitled to roughly 1,000 of them. That selectivity — a small
+slice of a large population — is what makes the entitlement filter's cost
+meaningful; the hand-built demo dataset is far too small to say anything about
+performance.
 
     uv run python scripts/generate_scale_data.py --wipe
     uv run python scripts/generate_scale_data.py --clients 250000 --teams 500
