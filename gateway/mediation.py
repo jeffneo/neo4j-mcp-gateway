@@ -64,7 +64,9 @@ _BLOCKED_FINAL = re.compile(
 )
 
 # Resolve the caller into {principalId, tenantId, authzPrincipals}. Everything is
-# parameterised except the relationship types, which Cypher cannot parameterise.
+# parameterised except the identity labels and group relationship types, which are
+# interpolated from bundle config — see DYNAMIC_TYPES below for why, since Cypher
+# 5.26+ *can* express both dynamically and the obvious hardening is unsafe here.
 _PRELUDE = """CALL {
   MATCH (u:@@ID_LABEL_EXPR@@)
   WHERE u.schemaId IS NULL
@@ -217,6 +219,36 @@ RETURN
 LIMIT 1"""
 
 
+# DYNAMIC_TYPES
+# -------------
+# Cypher 5.26+ supports dynamic node labels and relationship types — `MATCH
+# (n:$any($labels))` and `-[r:$any($types)]->` — which would let the two
+# interpolations below become ordinary parameters. That is the right instinct:
+# these values come from bundle.yaml, so they are author-trusted rather than
+# caller-supplied, but parameterising them would remove the last string
+# interpolation from the prelude.
+#
+# We do NOT use it for the group traversal, because on 2025.10.1 a dynamic
+# relationship type is SILENTLY IGNORED inside a variable-length pattern. Minimal
+# reproduction, on a graph of (a:A)-[:GOOD]->(:B), (a:A)-[:BAD]->(:B):
+#
+#     MATCH (a:A)-[:GOOD*1..3]->(b)       -> ['good']          correct
+#     MATCH (a:A)-[:$('GOOD')]->(b)       -> ['good']          correct (single hop)
+#     MATCH (a:A)-[:$('GOOD')*1..1]->(b)  -> ['good', 'bad']   TYPE FILTER DROPPED
+#
+# The plan confirms it: the expand degrades to an untyped `(u)-[*..]->(g)`. Our
+# prelude walks `-[:MEMBER_OF|...*1..]->` to collect the caller's groups, so this
+# would over-collect — handing the caller principals they do not hold, which is
+# privilege escalation, not a slow query. The quantified-path-pattern form
+# `(()-[:$('GOOD')]->()){1,3}` filters correctly and is the way in if we ever
+# adopt this.
+#
+# Labels are safe to parameterise (`DynamicLabelNodeLookup`, ~equal db hits), but
+# the planner cannot see the label at plan time and estimated 150,188 rows where
+# the interpolated form estimated 250. That mis-estimate is harmless in the
+# prelude and would not stay harmless once it feeds a join, so both stay
+# interpolated for consistency until there is a reason to move.
+
 def _subst(template: str, policy: SecurityPolicy) -> str:
     return (
         template
@@ -228,8 +260,9 @@ def _subst(template: str, policy: SecurityPolicy) -> str:
         .replace("@@P_EVERYONE@@", P_EVERYONE)
         .replace("@@P_PERM_PROP@@", P_PERM_PROP)
         .replace("@@GROUP_RELS@@", "|".join(policy.identity.group_rels))
-        # Label expression, not a parameter: Cypher cannot parameterise labels, and
-        # an unlabelled MATCH forces an AllNodesScan that grows with the whole graph.
+        # A label expression rather than an unlabelled MATCH: the latter forces an
+        # AllNodesScan that grows with the whole graph (measured: 405,430 db hits
+        # per call against 4,541). See DYNAMIC_TYPES above on why not `$any($p)`.
         .replace("@@ID_LABEL_EXPR@@", "|".join(policy.identity.labels))
     )
 
