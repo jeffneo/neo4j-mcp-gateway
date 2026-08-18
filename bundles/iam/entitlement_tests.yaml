@@ -172,3 +172,25 @@ cases:
     return: "RETURN count(x) AS id"
     id_field: id
     must_see: [0]
+
+  # ---------------------------------------------------------------------------
+  # Anchored tool. The harness additionally runs every anchored tool WITHOUT its
+  # anchor and fails on any difference, which is what catches an anchor that
+  # silently hides rows the caller is entitled to.
+  # ---------------------------------------------------------------------------
+  - name: covering salesperson sees their covered client trades
+    principal: anna.ross@bank.com
+    tool: covered_client_trades
+    id_field: tradeId
+    must_see: [TRD-3001]
+
+  - name: non-covering salesperson sees no covered trades
+    principal: priya.natarajan@bank.com
+    tool: covered_client_trades
+    id_field: tradeId
+    must_not_see: [TRD-3001]
+
+  - name: coverage parity holds on the anchored tool
+    same_for: [anna.ross@bank.com, joe.hart@bank.com, sam.diaz@bank.com]
+    tool: covered_client_trades
+    id_field: tradeId

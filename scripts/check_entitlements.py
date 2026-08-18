@@ -69,6 +69,24 @@ def _load_cases(path: Path) -> list[dict]:
     return cases
 
 
+def _anchored_pair(case: dict, specs: dict, policy) -> tuple[str, str, dict] | None:
+    """For an anchored tool, return (anchored, unanchored, args) for comparison.
+
+    An anchor restricts what the match examines, so a too-narrow one silently
+    hides rows the caller is entitled to — the filter cannot restore them. Running
+    the tool both ways and comparing is what catches that.
+    """
+    spec = specs.get(case.get("tool") or "")
+    if spec is None or not getattr(spec, "anchor", None):
+        return None
+    args = {p.name: p.default for p in spec.parameters if p.has_default}
+    args.update(case.get("args") or {})
+    common = (policy, spec.match_clause, spec.scope, spec.return_clause.strip(), spec.protect)
+    return (mediation.compose(*common, anchor=spec.anchor),
+            mediation.compose(*common, anchor=None),
+            args)
+
+
 def _resolve_query(case: dict, specs: dict, policy) -> tuple[str, dict]:
     """Build (query, args) for a case from either a named tool or an inline query."""
     name = case.get("name", "<unnamed>")
@@ -140,6 +158,7 @@ def run_case(executor, policy, specs: dict, case: dict, verbose: bool) -> tuple[
         raise CaseError(f"{name}: 'id_field' is required (the column identifying a row)")
 
     query, args = _resolve_query(case, specs, policy)
+    anchored_pair = _anchored_pair(case, specs, policy)
     principals = case.get("same_for") or ([case["principal"]] if case.get("principal") else [])
     if not principals:
         raise CaseError(f"{name}: needs 'principal' or 'same_for'")
@@ -150,6 +169,21 @@ def run_case(executor, policy, specs: dict, case: dict, verbose: bool) -> tuple[
         seen = _seen(executor, policy, query, args, principal, id_field)
         results[principal] = seen
         failures.extend(_check_assertions(case, principal, seen))
+
+        # An anchored tool must return exactly what it would unanchored.
+        if anchored_pair:
+            anchored_q, plain_q, a_args = anchored_pair
+            a_seen = _seen(executor, policy, anchored_q, a_args, principal, id_field)
+            p_seen = _seen(executor, policy, plain_q, a_args, principal, id_field)
+            if sorted(map(str, a_seen)) != sorted(map(str, p_seen)):
+                missing = set(map(str, p_seen)) - set(map(str, a_seen))
+                extra = set(map(str, a_seen)) - set(map(str, p_seen))
+                detail = []
+                if missing:
+                    detail.append(f"anchor HID {sorted(missing)} from {principal}")
+                if extra:
+                    detail.append(f"anchor added {sorted(extra)}")
+                failures.append("ANCHOR MISMATCH: " + "; ".join(detail))
         if verbose:
             print(f"      {principal:28} -> {seen}")
 

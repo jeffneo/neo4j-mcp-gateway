@@ -112,6 +112,15 @@ MATCH (g:AdGroup {name:gname})
 MERGE (user)-[:MEMBER_OF]->(g);
 
 // ---------- Coverage assignments ----------
+// Clients are covered by a TEAM (the durable fact); individuals inherit coverage
+// through team membership. Anchored tools traverse this path.
+UNWIND [
+  {client:'Acme Corp',         team:'coverage-acme'},
+  {client:'Zenith Industries', team:'coverage-zenith'}
+] AS cov
+MATCH (c:Client {name:cov.client}), (g:AdGroup {name:cov.team})
+MERGE (c)-[:COVERED_BY]->(g);
+
 UNWIND [
   {user:'anna.ross@bank.com',       client:'Acme Corp'},
   {user:'joe.hart@bank.com',        client:'Acme Corp'},

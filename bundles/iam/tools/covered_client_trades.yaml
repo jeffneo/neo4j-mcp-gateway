@@ -1,0 +1,39 @@
+# ANCHORED tool. The engine traverses from the caller to the clients they cover
+# BEFORE running the match, so the query starts from the caller's slice instead
+# of scanning every trade and discarding what they cannot see.
+#
+# Why anchoring is safe here: the anchor IS the question. "Trades for clients I
+# cover" means the coverage relationship defines the result set, so restricting
+# to it cannot hide anything the tool was meant to return.
+#
+# Do NOT anchor a tool whose callers reach the data by several different routes
+# (booker, desk, operations, supervision). An anchor can only narrow what is
+# matched, and the entitlement filter downstream cannot put rows back — a
+# too-narrow anchor silently hides data the caller is entitled to. See
+# ANCHOR_SAFETY in gateway/mediation.py. scripts/check_entitlements.py runs every
+# anchored tool a second time without its anchor and fails if the results differ.
+name: covered_client_trades
+description: >
+  Trades booked for the clients the caller personally covers, with notional and
+  desk. Scoped to the caller's own coverage — for a client-specific view that
+  also serves desk, operations and supervision, use client_activity instead.
+parameters:
+  - name: min_notional
+    type: number
+    description: Only include trades at or above this notional
+    required: false
+    default: 0
+match: |
+  MATCH (t:Trade)-[:FOR_CLIENT]->(c)
+  WHERE t.notional >= $min_notional
+scope: [t, c]
+protect: [t]
+anchor:
+  variable: c
+  via: "(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(c:Client)"
+return: |
+  RETURN c.name     AS client,
+         t.tradeId  AS tradeId,
+         t.notional AS notional
+  ORDER BY notional DESC
+read_only: true

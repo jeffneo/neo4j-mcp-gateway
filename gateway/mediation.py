@@ -79,7 +79,7 @@ _PRELUDE = """CALL {
         + coalesce(u[$@@P_INLINE_GROUPS@@], [])
         + [ head([k IN $@@P_MATCH_KEYS@@ WHERE u[k] IS NOT NULL | u[k]]), $@@P_EVERYONE@@ ]
       WHERE p IS NOT NULL]
-  } AS authz
+  } AS authz, u AS caller
 }"""
 
 # (a) explicitly protected -> STRICT: must carry an ACL and match.
@@ -98,6 +98,47 @@ WHERE all(resource IN [@@PROTECTED@@] WHERE resource IS NULL OR (
       AND any(principal IN resource[$@@P_PERM_PROP@@]
               WHERE principal IN authz.authzPrincipals)
     ))"""
+
+# ANCHOR_SAFETY
+# -------------
+# An anchor RESTRICTS what the tool's match examines, and the entitlement filter
+# that follows can only remove rows further. The two error directions are NOT
+# symmetric:
+#
+#   anchor too BROAD   -> extra rows examined, filter removes them.
+#                         Correct, merely slower. Cannot leak.
+#   anchor too NARROW  -> rows the caller IS entitled to are never matched, and
+#                         nothing downstream can restore them. FALSE NEGATIVES.
+#
+# So an anchor cannot cause a disclosure, but it can silently hide data. The rule
+# is therefore: the anchor must reach EVERY route by which a caller may be
+# entitled to that variable. In practice this means anchoring belongs on tools
+# whose question *is* the anchor ("trades for clients I cover"), not on general
+# tools serving several roles with different entitlement routes.
+#
+# scripts/check_entitlements.py runs every anchored tool a second time WITHOUT the
+# anchor and fails if the result sets differ, which is what catches a too-narrow
+# anchor in CI.
+_ANCHOR_BLOCKED = re.compile(
+    r"\b(return|create|merge|delete|set|remove|drop|detach|call|union|with)\b|;"
+)
+
+
+def validate_anchor(variable: str, pattern: str, scope: list[str]) -> None:
+    """Check an author-declared anchor before it is interpolated into Cypher."""
+    if variable not in scope:
+        raise ToolError(f"anchor variable {variable!r} is not in scope {scope}")
+    if variable == "caller":
+        raise ToolError("'caller' is reserved for the authenticated principal")
+    if not _IDENTIFIER.match(variable):
+        raise ToolError(f"anchor variable {variable!r} is not a valid identifier")
+    if "caller" not in pattern:
+        raise ToolError("the anchor pattern must start from (caller)")
+    if variable not in pattern:
+        raise ToolError(f"the anchor pattern must bind {variable!r}")
+    if _ANCHOR_BLOCKED.search(_strip_comments(pattern).lower()):
+        raise ToolError("the anchor pattern must be a bare MATCH pattern (no clauses)")
+
 
 # Standalone identity lookup used by the resolve-identity tool.
 RESOLVE_IDENTITY_QUERY = """MATCH (u:@@ID_LABEL_EXPR@@)
@@ -258,17 +299,39 @@ def compose(
     scope: list[str],
     final_return: str,
     protect: list[str] | None = None,
+    anchor: tuple[str, str] | None = None,
 ) -> str:
-    """Build the full mediated query: prelude + match + filter + return."""
+    """Build the full mediated query: prelude + [anchor] + match + filter + return.
+
+    ``anchor`` is an optional ``(variable, pattern)`` pair. When given, the engine
+    traverses from the caller to that variable BEFORE running the tool's match, so
+    the match starts from what the caller can reach instead of scanning everything
+    and discarding. The entitlement filter still runs over the full scope
+    afterwards, so an over-broad anchor cannot leak — see ANCHOR_SAFETY below.
+    """
     protect = [v for v in (protect or []) if v in scope]
     derived = [v for v in scope if v not in protect]
-    body = (
-        "CALL {\n  WITH authz\n  " + match_clause.strip()
-        + "\n  RETURN " + ", ".join(scope) + "\n}"
-    )
+
+    if anchor:
+        anchor_var, anchor_pattern = anchor
+        # DISTINCT matters: several paths may reach the same anchor node (a client
+        # covered by two teams the caller belongs to), which would otherwise
+        # multiply rows and corrupt any aggregate in the final return.
+        inner_scope = [v for v in scope if v != anchor_var]
+        body = f"MATCH {anchor_pattern.strip()}\nWITH DISTINCT authz, caller, {anchor_var}"
+        if inner_scope:
+            body += (
+                "\nCALL {\n  WITH " + anchor_var + "\n  " + match_clause.strip()
+                + "\n  RETURN " + ", ".join(inner_scope) + "\n}"
+            )
+    else:
+        body = (
+            "CALL {\n  WITH authz\n  " + match_clause.strip()
+            + "\n  RETURN " + ", ".join(scope) + "\n}"
+        )
     filt = (
         _FILTER
-        .replace("@@SCOPE_WITH@@", ", ".join(["authz"] + scope))
+        .replace("@@SCOPE_WITH@@", ", ".join(["authz", "caller"] + scope))
         .replace("@@PROTECTED@@", ", ".join(protect))
         .replace("@@DERIVED@@", ", ".join(derived))
     )

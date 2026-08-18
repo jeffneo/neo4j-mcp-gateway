@@ -129,11 +129,34 @@ WITH … WHERE <filter>                                            // unchanged
 The contract is: *if you declare an anchor, your match must use that variable as
 already bound rather than binding it fresh.*
 
-**The critical safety property: the anchor is an optimisation, the filter is the
-guarantee.** The filter still runs over everything in scope. A wrong or missing
-anchor costs speed, never correctness. This mirrors `protect:` versus derived
-protection — declarations make things faster or stricter, but security never
-depends on the author getting a declaration right.
+### Safety: the two error directions are not symmetric
+
+An early draft of this design claimed a wrong anchor "costs speed, never
+correctness". **That is only half true, and the implementation corrected it.**
+An anchor restricts what the match examines, and the filter downstream can only
+remove rows further — never restore them:
+
+| Anchor is | Effect |
+| --- | --- |
+| too **broad** | extra rows examined, filter removes them — correct, merely slower. **Cannot leak.** |
+| too **narrow** | rows the caller *is* entitled to are never matched. **False negatives.** |
+
+So an anchor cannot cause a disclosure, but it *can* silently hide data. The rule
+is that an anchor must reach every route by which a caller may be entitled to
+that variable. In practice, anchor tools whose question **is** the anchor
+("trades for clients I cover"), not general tools serving several roles that
+reach the data differently.
+
+This is enforced rather than trusted: `scripts/check_entitlements.py` runs every
+anchored tool a second time *without* its anchor and fails on any difference.
+Wrongly anchoring a tool that also serves desk and operations users produces:
+
+```
+FAIL  owning desk sees the trade
+      ANCHOR MISMATCH: anchor HID ['TRD-3001'] from tom.becker@bank.com
+```
+
+Documented as `ANCHOR_SAFETY` in `gateway/mediation.py`.
 
 ## 4. Provenance — `explain-access`
 
@@ -249,8 +272,24 @@ reference should recommend bounded patterns.
 Revised by the spike results — anchoring moves first, because it is where the
 performance is and it is independent of the grant model.
 
-**Build first:** anchoring (`anchor:` on a mediated tool), which delivers 20×
-against today's composition regardless of how grants are expressed.
+**Built.** Anchoring (`anchor:` on a mediated tool) is implemented: the prelude
+exposes the caller node, `compose()` emits the anchor traversal ahead of the
+tool's match with a `WITH DISTINCT` so multiple paths to one anchor node cannot
+multiply rows, and the conformance harness verifies anchored equals unanchored.
+
+Measured through the engine on 100,000 trades, caller entitled to 1,000:
+
+| Tool shape | unanchored | anchored | speedup |
+| --- | --- | --- | --- |
+| returns an aggregate | 121.1 ms | 8.5 ms | **14×** |
+| returns 1,000 sorted rows | 150.1 ms | 25.4 ms | **6×** |
+
+Both return identical results. The gap between them is the point: **anchoring
+accelerates matching, not returning.** The ~17 ms of row materialisation and
+sorting is common to both variants, so a tool that returns many rows sees a
+smaller ratio than one that aggregates. Quote the shape along with the number —
+the isolated composition measured 20–33×, and a row-returning tool will not
+reach that.
 
 **Build next:** `grant_model` config, path filter semantics, `both` mode, and
 differential validation in the conformance harness — for materialisation,

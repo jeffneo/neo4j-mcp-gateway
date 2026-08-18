@@ -93,6 +93,10 @@ class ToolSpec:
     return_clause: str = ""
     scope: list[str] = field(default_factory=list)
     protect: list[str] = field(default_factory=list)
+    # Optional (variable, pattern): traverse from the caller to `variable` before
+    # running the match, so the query starts from what the caller can reach. See
+    # ANCHOR_SAFETY in gateway/mediation.py — a too-narrow anchor hides rows.
+    anchor: tuple[str, str] | None = None
     # Optional arguments used only by scripts/validate_bundle.py, so a tool with
     # required parameters can still be exercised (and persona-diffed) in CI.
     sample_args: dict[str, Any] = field(default_factory=dict)
@@ -175,6 +179,7 @@ def parse_tool_spec(path: Path) -> ToolSpec:
 
     scope: list[str] = []
     protect: list[str] = []
+    anchor: tuple[str, str] | None = None
     if has_mediated:
         _require(
             isinstance(return_clause, str) and return_clause.strip() != "",
@@ -192,6 +197,20 @@ def parse_tool_spec(path: Path) -> ToolSpec:
             _require(v.isidentifier(), path, f"variable {v!r} is not a valid Cypher identifier")
         unknown = [v for v in protect if v not in scope]
         _require(not unknown, path, f"'protect' lists variables missing from 'scope': {unknown}")
+
+        raw_anchor = raw.get("anchor")
+        if raw_anchor is not None:
+            _require(isinstance(raw_anchor, dict), path,
+                     "'anchor' must be a mapping with 'variable' and 'via'")
+            avar, avia = raw_anchor.get("variable"), raw_anchor.get("via")
+            _require(isinstance(avar, str) and isinstance(avia, str) and avar and avia, path,
+                     "'anchor' needs both 'variable' and 'via'")
+            from . import mediation
+            try:
+                mediation.validate_anchor(avar, avia, scope)
+            except Exception as exc:
+                raise ToolSpecError(f"{path.name}: {exc}") from exc
+            anchor = (avar, avia)
 
     sample_args = raw.get("sample_args") or {}
     _require(isinstance(sample_args, dict), path, "'sample_args' must be a mapping if present")
@@ -245,6 +264,7 @@ def parse_tool_spec(path: Path) -> ToolSpec:
         return_clause=return_clause if has_mediated else "",
         scope=scope,
         protect=protect,
+        anchor=anchor,
         sample_args=dict(sample_args),
     )
 
@@ -366,7 +386,8 @@ class Neo4jExecutor:
 # --------------------------------------------------------------------------- #
 
 def resolve_tool_query(
-    config: Config | None, spec: ToolSpec, principal: str | None = None
+    config: Config | None, spec: ToolSpec, principal: str | None = None,
+    use_anchor: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """Return ``(query, extra_params)`` for a tool spec.
 
@@ -383,7 +404,8 @@ def resolve_tool_query(
 
     resolved, _ = mediation.resolve_principal(policy, principal, config.env_snapshot)
     query = mediation.compose(
-        policy, spec.match_clause, spec.scope, spec.return_clause.strip(), spec.protect
+        policy, spec.match_clause, spec.scope, spec.return_clause.strip(), spec.protect,
+        anchor=spec.anchor if use_anchor else None,
     )
     return query, mediation.security_params(policy, resolved)
 
