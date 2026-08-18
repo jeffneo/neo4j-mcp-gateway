@@ -158,6 +158,24 @@ live database, in addition to running every tool:
   indistinguishable from no filter, so each mediated tool is run as several real
   principals and the results compared.
 
+### Conformance cases
+
+`scripts/check_entitlements.py` runs declarative cases from a bundle's
+`entitlement_tests.yaml`, asserting what a named principal **must see** and
+**must not see**, plus exact counts and cross-principal parity (`same_for`, for
+"two people covering the same client must see the same book"). It exits non-zero
+on failure, so it gates CI and stands as evidence in a security review.
+
+```bash
+uv run python scripts/check_entitlements.py iam
+```
+
+The negative assertions are the security tests. Note the division of labour with
+the data guard above: a record explicitly named in `protect` and **missing** its
+ACL is *denied* (fail closed), so conformance still passes; a record only in
+derived scope and missing its ACL becomes visible to everyone, and that is what
+`protected_labels` catches. Two failure modes, two guards.
+
 ### Measuring the cost
 
 `scripts/bench_mediation.py` runs each mediated tool three ways — open (no
@@ -171,9 +189,24 @@ uv run python scripts/bench_mediation.py iam --runs 50
 ```
 
 Prefer db hits to wall-clock on small datasets: wall-clock there is mostly
-network round-trip. Only the variable component grows with your data, so the
-fixed component is the one to attack — by caching resolved principals, or by
-sourcing them from an external policy service instead of a graph traversal.
+network round-trip. `scripts/generate_scale_data.py` builds a realistically
+shaped dataset (by default 100,000 clients with any one salesperson entitled to
+~1,000) so the numbers mean something.
+
+Two things scale testing established:
+
+- **Identity labels must be scoped.** The prelude matches `(u:Label|Label)` using
+  the configured `identity.labels`, which the planner resolves to a label scan.
+  An unlabelled match would force an `AllNodesScan` that grows with the entire
+  graph — on the 200k-node dataset that was 405,430 db hits per call versus
+  4,541 once scoped.
+- **The remaining cost is rows examined, not identity.** The filter tests list
+  membership per row, which is CPU rather than db hits, so the way to reduce it
+  is to examine fewer rows. Filtering after a full scan means touching every
+  record and discarding what the caller cannot see; anchoring the query on what
+  the caller covers touches only the entitled subset. On the 100k dataset the
+  same answer cost 700,001 db hits scanned-and-filtered versus 5,015 anchored.
+  That difference is the argument for the path-based grant model in §7.
 
 ## 6. Known limits
 

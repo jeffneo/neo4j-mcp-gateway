@@ -64,9 +64,8 @@ _BLOCKED_FINAL = re.compile(
 # Resolve the caller into {principalId, tenantId, authzPrincipals}. Everything is
 # parameterised except the relationship types, which Cypher cannot parameterise.
 _PRELUDE = """CALL {
-  MATCH (u)
+  MATCH (u:@@ID_LABEL_EXPR@@)
   WHERE u.schemaId IS NULL
-    AND any(label IN labels(u) WHERE label IN $@@P_ID_LABELS@@)
     AND any(key IN $@@P_MATCH_KEYS@@
             WHERE u[key] IS NOT NULL
               AND toLower(toString(u[key])) = toLower($@@P_PRINCIPAL@@))
@@ -101,9 +100,8 @@ WHERE all(resource IN [@@PROTECTED@@] WHERE resource IS NULL OR (
     ))"""
 
 # Standalone identity lookup used by the resolve-identity tool.
-RESOLVE_IDENTITY_QUERY = """MATCH (u)
+RESOLVE_IDENTITY_QUERY = """MATCH (u:@@ID_LABEL_EXPR@@)
 WHERE u.schemaId IS NULL
-  AND any(label IN labels(u) WHERE label IN $@@P_ID_LABELS@@)
   AND any(key IN $@@P_MATCH_KEYS@@
           WHERE u[key] IS NOT NULL AND toLower(toString(u[key])) = toLower($@@P_PRINCIPAL@@))
 OPTIONAL MATCH (u)-[:@@GROUP_RELS@@*1..]->(g)
@@ -132,6 +130,9 @@ def _subst(template: str, policy: SecurityPolicy) -> str:
         .replace("@@P_EVERYONE@@", P_EVERYONE)
         .replace("@@P_PERM_PROP@@", P_PERM_PROP)
         .replace("@@GROUP_RELS@@", "|".join(policy.identity.group_rels))
+        # Label expression, not a parameter: Cypher cannot parameterise labels, and
+        # an unlabelled MATCH forces an AllNodesScan that grows with the whole graph.
+        .replace("@@ID_LABEL_EXPR@@", "|".join(policy.identity.labels))
     )
 
 

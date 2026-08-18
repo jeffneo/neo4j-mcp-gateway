@@ -153,6 +153,11 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
     for rel in identity.group_rels:
         if not rel.replace("_", "").isalnum():
             raise ValueError(f"{f}: security.identity.group_rels contains invalid type {rel!r}")
+    if not identity.labels:
+        raise ValueError(f"{f}: security.identity.labels must name at least one label")
+    for label in identity.labels:
+        if not label.replace("_", "").isalnum():
+            raise ValueError(f"{f}: security.identity.labels contains invalid label {label!r}")
 
     p_raw = sec_raw.get("principal") or {}
     if not isinstance(p_raw, dict):

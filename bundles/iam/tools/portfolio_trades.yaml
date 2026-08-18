@@ -1,0 +1,28 @@
+# "What's in my book?" — the whole entitled population, aggregated.
+#
+# This is the scale-sensitive shape: the query touches every trade, and the
+# entitlement filter decides which ones count. Because it returns an aggregate
+# rather than rows, benchmarking it measures filter cost without row-transfer
+# cost, and it demonstrates the property that matters most to a regulated desk:
+# the totals themselves are per-entitlement, never firm-wide.
+name: portfolio_trades
+description: >
+  Summarise the trades the caller is entitled to see — count, total notional, and
+  the number of distinct clients. Totals reflect only the caller's entitlements,
+  not the firm-wide book.
+parameters:
+  - name: min_notional
+    type: number
+    description: Only include trades at or above this notional
+    required: false
+    default: 0
+match: |
+  MATCH (t:Trade)-[:FOR_CLIENT]->(c:Client)
+  WHERE t.notional >= $min_notional
+scope: [t, c]
+protect: [t]
+return: |
+  RETURN count(t)          AS trades,
+         count(DISTINCT c) AS clients,
+         sum(t.notional)   AS totalNotional
+read_only: true

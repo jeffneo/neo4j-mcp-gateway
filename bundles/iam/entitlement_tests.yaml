@@ -1,0 +1,174 @@
+# Entitlement conformance cases.
+#
+# Each case states what a named principal MUST see and MUST NOT see. The negative
+# assertions are the security tests: proving Joe can read his own thread is easy,
+# proving he cannot read a colleague's private chat is the requirement.
+#
+# Run:  uv run python scripts/check_entitlements.py iam
+# Exits non-zero on any failure, so it belongs in CI and in the eval evidence pack.
+
+cases:
+  # ---------------------------------------------------------------------------
+  # Private client communications — entitled to the participants, not the team.
+  # ---------------------------------------------------------------------------
+  - name: participant sees their own private client chat
+    principal: anna.ross@bank.com
+    match: |
+      MATCH (x:Communication)-[:WITH_CLIENT]->(:Client {name: 'Acme Corp'})
+    scope: [x]
+    return: "RETURN x.commId AS id"
+    id_field: id
+    must_see: [COMM-1001, COMM-1002]
+
+  - name: coverage colleague cannot see a private 1:1 chat
+    principal: joe.hart@bank.com
+    match: |
+      MATCH (x:Communication)-[:WITH_CLIENT]->(:Client {name: 'Acme Corp'})
+    scope: [x]
+    return: "RETURN x.commId AS id"
+    id_field: id
+    must_see: [COMM-1002]
+    must_not_see: [COMM-1001]
+
+  - name: unrelated coverage sees no Acme communications
+    principal: priya.natarajan@bank.com
+    match: |
+      MATCH (x:Communication)-[:WITH_CLIENT]->(:Client {name: 'Acme Corp'})
+    scope: [x]
+    return: "RETURN x.commId AS id"
+    id_field: id
+    expect_count: 0
+
+  # ---------------------------------------------------------------------------
+  # Coverage parity — the canonical requirement: two salespeople covering the
+  # same client must see exactly the same book, with no reconciliation.
+  # ---------------------------------------------------------------------------
+  - name: coverage team members see an identical request book
+    same_for: [joe.hart@bank.com, sam.diaz@bank.com]
+    match: |
+      MATCH (:Client {name: 'Acme Corp'})-[:SUBMITTED]->(x:Request)
+    scope: [x]
+    return: "RETURN x.requestId AS id"
+    id_field: id
+
+  # ---------------------------------------------------------------------------
+  # Booked trade — visible to the booker, the coverage team, the owning desk,
+  # settlements and supervision; to nobody else.
+  # ---------------------------------------------------------------------------
+  - name: booker sees the trade they booked
+    principal: anna.ross@bank.com
+    tool: client_activity
+    args: {client: Acme Corp}
+    id_field: tradeId
+    must_see: [TRD-3001]
+
+  - name: coverage team sees the client trade
+    same_for: [anna.ross@bank.com, joe.hart@bank.com, sam.diaz@bank.com]
+    tool: client_activity
+    args: {client: Acme Corp}
+    id_field: tradeId
+
+  - name: owning desk sees the trade
+    principal: tom.becker@bank.com
+    tool: client_activity
+    args: {client: Acme Corp}
+    id_field: tradeId
+    must_see: [TRD-3001]
+
+  - name: settlements sees the trade
+    principal: olu.adeyemi@bank.com
+    tool: client_activity
+    args: {client: Acme Corp}
+    id_field: tradeId
+    must_see: [TRD-3001]
+
+  - name: unrelated coverage cannot see the trade
+    principal: priya.natarajan@bank.com
+    tool: client_activity
+    args: {client: Acme Corp}
+    id_field: tradeId
+    must_not_see: [TRD-3001]
+    expect_count: 0
+
+  - name: private side cannot see markets trades
+    principal: david.okafor@bank.com
+    tool: client_activity
+    args: {client: Acme Corp}
+    id_field: tradeId
+    must_not_see: [TRD-3001]
+    expect_count: 0
+
+  # ---------------------------------------------------------------------------
+  # Information barrier — a wall-crossed deal is need-to-know only. Broad rights
+  # in one domain must not imply access in another.
+  # ---------------------------------------------------------------------------
+  - name: named deal team sees the wall-crossed deal
+    principal: david.okafor@bank.com
+    match: |
+      MATCH (x:Deal)-[:INVOLVES_CLIENT]->(:Client {name: 'Acme Corp'})
+    scope: [x]
+    return: "RETURN x.dealId AS id"
+    id_field: id
+    must_see: [DEAL-4001]
+
+  - name: supervision does not cross the information barrier
+    principal: maria.chen@bank.com
+    match: |
+      MATCH (x:Deal)-[:INVOLVES_CLIENT]->(:Client {name: 'Acme Corp'})
+    scope: [x]
+    return: "RETURN x.dealId AS id"
+    id_field: id
+    must_not_see: [DEAL-4001]
+    expect_count: 0
+
+  - name: sales cannot see the wall-crossed deal
+    principal: anna.ross@bank.com
+    match: |
+      MATCH (x:Deal)-[:INVOLVES_CLIENT]->(:Client {name: 'Acme Corp'})
+    scope: [x]
+    return: "RETURN x.dealId AS id"
+    id_field: id
+    expect_count: 0
+
+  # ---------------------------------------------------------------------------
+  # Supervision and firm-wide baselines.
+  # ---------------------------------------------------------------------------
+  - name: supervision sees all client communications firm-wide
+    principal: maria.chen@bank.com
+    match: |
+      MATCH (x:Communication)
+    scope: [x]
+    return: "RETURN x.commId AS id"
+    id_field: id
+    must_see: [COMM-1001, COMM-1002, COMM-1003]
+
+  - name: published research is readable by everyone
+    same_for:
+      [anna.ross@bank.com, david.okafor@bank.com, olu.adeyemi@bank.com]
+    match: |
+      MATCH (x:ResearchNote)
+    scope: [x]
+    return: "RETURN x.noteId AS id"
+    id_field: id
+
+  # ---------------------------------------------------------------------------
+  # Aggregates must be computed after filtering, not before. A total that leaks
+  # the firm-wide number is as much a breach as leaking the rows.
+  # ---------------------------------------------------------------------------
+  - name: notional totals are per-entitlement, not firm-wide
+    principal: joe.hart@bank.com
+    match: |
+      MATCH (:Client {name: 'Acme Corp'})-[:SUBMITTED]->(x:Request)
+    scope: [x]
+    return: "RETURN sum(x.notional) AS id"
+    id_field: id
+    must_see: [95000000.0]
+
+  - name: an unentitled caller aggregates to zero, not to the real total
+    principal: david.okafor@bank.com
+    match: |
+      MATCH (:Client {name: 'Acme Corp'})-[:SUBMITTED]->(x:Request)
+    scope: [x]
+    return: "RETURN count(x) AS id"
+    id_field: id
+    must_see: [0]
