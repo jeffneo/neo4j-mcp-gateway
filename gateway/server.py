@@ -23,6 +23,8 @@ from fastmcp import FastMCP
 
 from .bundles import list_bundles
 from .config import BUNDLES_DIR, Config, resolve_configs
+from .audit import (ENV_PATH, AuditMiddleware, AuditSink, audit_path,
+                    include_arguments)
 from .middleware import HideToolsMiddleware
 from .proxy import build_downstream_proxy
 from .pytools import load_pytools
@@ -62,6 +64,29 @@ def _check_connection_safety(configs: list[Config]) -> None:
                 f"           Fix: give them separate databases/instances (per-bundle .env), make "
                 f"both mediated, or serve them from separate gateway processes."
             )
+
+
+
+def _audit_middleware(configs: list[Config]) -> list:
+    """Build the audit middleware, or refuse to start if a bundle requires it.
+
+    ``security.require_audit`` is the same fail-closed stance as
+    ``security.mode``: running an entitlement-mediated bundle with no trail
+    becomes a recorded decision rather than something that happens by omission.
+    """
+    env = configs[0].env_snapshot
+    path = audit_path(env)
+    requiring = [c.active_bundle for c in configs if c.security.require_audit]
+    if requiring and not path:
+        raise SystemExit(
+            f"[gateway] bundle(s) {', '.join(requiring)} declare security.require_audit, "
+            f"but no audit log is configured. Set {ENV_PATH}=/path/to/audit.jsonl, or "
+            "remove require_audit to run unaudited deliberately.")
+    if not path:
+        return []
+    args = include_arguments(env)
+    _log(f"audit log: {path}" + ("  (including argument values)" if args else ""))
+    return [AuditMiddleware(AuditSink(path), configs, log_arguments=args)]
 
 
 def _compose_instructions(configs: list[Config]) -> str:
@@ -105,7 +130,9 @@ def build_gateway(config: Config | None = None) -> FastMCP:
         _log("WARNING: security.allow_unmediated_read=true — raw read-cypher is exposed "
              "and bypasses entitlement filtering")
 
-    middleware = [HideToolsMiddleware(hidden)] if hidden else []
+    middleware = _audit_middleware([config])
+    if hidden:
+        middleware.append(HideToolsMiddleware(hidden))
     gateway = FastMCP(name=config.server_name, instructions=config.instructions, middleware=middleware)
 
     # 1) Proxy the official downstream server and mount its tools unchanged.
@@ -176,10 +203,13 @@ def _build_multi_gateway(configs: list[Config]) -> FastMCP:
             if f"{prefix}read-cypher" not in hidden:
                 hidden.append(f"{prefix}read-cypher")
 
+    middleware = _audit_middleware(configs)
+    if hidden:
+        middleware.append(HideToolsMiddleware(hidden))
     gateway = FastMCP(
         name=os.getenv("GATEWAY_NAME") or "neo4j-mcp-gateway",
         instructions=_compose_instructions(configs),
-        middleware=[HideToolsMiddleware(hidden)] if hidden else [],
+        middleware=middleware,
     )
 
     # One downstream child per distinct datasource. Bundles sharing a connection

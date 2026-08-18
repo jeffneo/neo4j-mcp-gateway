@@ -88,10 +88,10 @@ class IdentityConfig:
                       connection) and the resulting principals are passed into
                       the data query as a parameter. Two round trips.
 
-    The two separated sources trade capability for independence: no caller node
-    reaches the data query, so path grants and anchoring are unavailable and
-    ``grant_model`` must be ``property``. See SEPARATION_TRADEOFFS in
-    gateway/identity_sources.py.
+    The two separated sources keep path grants and anchoring — both are
+    traversals from the caller, and both are cut at a proxy node present in each
+    database. What they need instead is those proxies. See SEPARATION_TRADEOFFS
+    in gateway/identity_sources.py and GRANT_SPLITTING in gateway/mediation.py.
     """
 
     source: str = "graph"
@@ -161,6 +161,8 @@ class SecurityPolicy:
     # Used by explain-access to find the row a question is about.
     resource_keys: dict[str, str] = field(default_factory=dict)
     expose_open_query_tool: bool = True
+    # Refuse to start unless an audit log is configured. Fail-closed, like `mode`.
+    require_audit: bool = False
     # Keep the proxied raw read-cypher despite mediation. Defeats the guarantee;
     # requires an explicit opt-in and is logged loudly.
     allow_unmediated_read: bool = False
@@ -359,6 +361,7 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
         identity=identity,
         principal=principal,
         expose_open_query_tool=bool(sec_raw.get("expose_open_query_tool", True)),
+        require_audit=bool(sec_raw.get("require_audit", False)),
         allow_unmediated_read=bool(sec_raw.get("allow_unmediated_read", False)),
     )
 

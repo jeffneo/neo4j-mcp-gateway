@@ -153,6 +153,41 @@ limits: [`docs/mediation-spec.md`](docs/mediation-spec.md).
 > property keys) but no row data. Add it to `downstream.hide` if your deployment
 > treats the schema itself as sensitive.
 
+### Audit logging
+
+Set a path and every tool call appends one JSON object — who called, as whom,
+which tool, in which bundle, the outcome, and **how many rows survived the
+filter**:
+
+```bash
+NEO4J_MCP_AUDIT_LOG=/var/log/neo4j-mcp/audit.jsonl
+NEO4J_MCP_AUDIT_ARGUMENTS=true    # optional: also record argument VALUES
+```
+
+```json
+{"ts":"2026-08-18T19:18:36.407+00:00","event":"tool_call","tool":"client_opportunities",
+ "bundle":"client_platform","mode":"mediated","identitySource":"graph","grantModel":"both",
+ "principal":"evan.brooks@bank.com","principalSource":"impersonation-request",
+ "impersonated":true,"argumentNames":["client"],"durationMs":18.1,"outcome":"ok","rows":1}
+```
+
+**Row contents are never logged.** An audit log that copies the rows it audits is
+a second, less-protected replica of the data the filter exists to restrict —
+usually on a filesystem with weaker controls, often shipped to an aggregator a
+different team can read. The record carries the row *count* and nothing about the
+rows. Argument values are the judgement call and are off by default; argument
+*names* are always recorded, so you can see which question was asked without its
+subject.
+
+`impersonated` is top-level rather than something to infer: running as another
+principal is a privileged action and is the first thing a reviewer looks for.
+Proxied tools are covered too, so an `open` bundle's raw `read-cypher` is audited
+on the same terms — and a call to a hidden tool is recorded as a rejection.
+
+A bundle can declare `security.require_audit: true`, and the gateway then
+**refuses to start** without a log path — the same fail-closed stance as
+`security.mode`.
+
 ### Where identity lives
 
 By default the identity graph sits beside the data and the prelude traverses it

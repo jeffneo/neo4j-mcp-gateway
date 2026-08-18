@@ -208,6 +208,41 @@ Two things scale testing established:
   same answer cost 700,001 db hits scanned-and-filtered versus 5,015 anchored.
   That difference is the argument for the path-based grant model in §7.
 
+## 5b. Audit trail
+
+`gateway/audit.py` appends one JSON object per tool call when
+`NEO4J_MCP_AUDIT_LOG` is set. It is a record of **authorization decisions**, not
+of data.
+
+| Field | Why it is there |
+| --- | --- |
+| `principal`, `principalSource` | who the call ran as, and how that was established (`env:X` or `impersonation-request`) |
+| `impersonated` | top-level boolean: running as another principal is a privileged action and the first thing a reviewer looks for |
+| `bundle`, `tool`, `mode` | which surface was used, and whether it was filtered at all |
+| `identitySource`, `grantModel` | which topology and which entitlement model produced the decision |
+| `rows` | how many rows survived the filter — the outcome of the decision |
+| `outcome`, `error`, `durationMs` | success, rejection, or failure |
+| `argumentNames` | which question was asked, without its subject |
+| `arguments` | the subject too — **opt-in**, `NEO4J_MCP_AUDIT_ARGUMENTS=true` |
+
+**Row contents are never recorded.** A log that copies the rows it audits is a
+second, less-protected replica of the data the filter exists to restrict, on a
+filesystem with weaker controls and often shipped to an aggregator a different
+team can read. That is why `rows` is a count.
+
+Coverage is the whole gateway, not only mediated tools: proxied tools are wrapped
+too, so an `open` bundle's raw `read-cypher` is audited on the same terms, and an
+attempt to call a hidden tool is recorded as a rejection rather than vanishing.
+
+`security.require_audit: true` makes the gateway refuse to start without a log
+path configured — running unaudited becomes a recorded decision, matching how
+`security.mode` treats running unfiltered.
+
+**Not included, and worth saying so in a review:** the log is append-only by
+convention, not tamper-evident. There is no hash chain and no signature. A
+deployment that needs those should ship lines to a WORM store or a SIEM at write
+time; this file is the source, not the control.
+
 ## 6. Known limits
 
 - **The gateway is the enforcement boundary**, not the database. Anyone with

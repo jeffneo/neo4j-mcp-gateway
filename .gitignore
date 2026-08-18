@@ -9,6 +9,10 @@
 !.env.example
 .envrc
 
+# Audit logs — a record of who read what. Never committable, even by accident.
+*.jsonl
+audit/
+
 # Python / uv
 .venv/
 __pycache__/
