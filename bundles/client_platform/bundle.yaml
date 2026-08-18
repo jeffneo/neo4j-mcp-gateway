@@ -1,0 +1,57 @@
+# Client platform bundle — up/cross-sell over an institutional client platform,
+# with entitlement mediation. Select with: ACTIVE_BUNDLE=client_platform
+name: neo4j-client-platform-gateway
+description: Institutional client platform — adoption, coverage and cross-sell, entitlement-filtered.
+
+instructions: >
+  This gateway analyses a DIGITAL CLIENT PLATFORM through which institutional
+  clients consume research, analytics, execution and data/API products. The
+  commercial question is up/cross-sell: which client should be offered which
+  product next. Entities: Client, Product, UsageSummary, Interaction,
+  Opportunity, ResearchNote, plus User, AdGroup and Desk on the identity side.
+  Relationships: SUBSCRIBES_TO, FOR_CLIENT, FOR_PRODUCT, WITH_CLIENT, LOGGED,
+  COVERS, COVERED_BY, MEMBER_OF, ON_DESK.
+  Access is entitlement-filtered: a caller sees the clients their team covers,
+  a product specialist sees their own product family, and supervision sees
+  everything. Client and Product are reference data; UsageSummary, Interaction
+  and Opportunity are permissioned. WORKFLOW: call resolve-identity first to
+  establish who you are acting as, then use the curated usecase_ tools. Results
+  are already filtered to the caller's entitlements, so never describe a result
+  as the complete firm-wide picture. Use explain-access to answer "why can I see
+  this?". Raw read-cypher is unavailable because it would bypass the filter.
+
+# Connection is env-only. Drop a git-ignored .env here to point this bundle at
+# its own Aura instance — see docs/entitlement-testing-tutorial.md for the
+# topologies this supports.
+
+security:
+  mode: mediated
+  permissions_property: "Permissions.Read"
+  protected_labels: [Interaction, Opportunity, UsageSummary]
+
+  # 'both' because the routes genuinely differ in kind. Coverage and authorship
+  # are relationships and are declared as paths; product-specialist and
+  # supervisory access are roles and stay as list entries.
+  grant_model: both
+  grants:
+    - label: Interaction
+      via: "(caller)-[:LOGGED]->(resource)"
+      reason: "logged this interaction"
+    - label: Interaction
+      via: "(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:WITH_CLIENT]-(resource)"
+      reason: "covers the client this interaction was with"
+    - label: Opportunity
+      via: "(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)"
+      reason: "covers the client this opportunity is for"
+    - label: UsageSummary
+      via: "(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)"
+      reason: "covers the client this usage belongs to"
+
+  resource_keys:
+    Interaction: interactionId
+    Opportunity: opportunityId
+    UsageSummary: usageId
+
+downstream:
+  read_only: true
+  # read-cypher is hidden automatically because mode is mediated.

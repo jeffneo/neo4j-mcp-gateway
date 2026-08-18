@@ -1,0 +1,29 @@
+# Scoped to the caller's own coverage, expressed directly in the match via the
+# `caller` variable the engine binds. That is a BUSINESS scoping decision — "my
+# clients" — and belongs in the query.
+#
+# It is deliberately NOT an `anchor:`. An anchor is a performance optimisation
+# that must not change which rows are entitled; this narrowing is the question
+# itself. Conflating the two would trip the anchor-equivalence check in
+# scripts/check_entitlements.py, and rightly so. For anchoring proper, see
+# covered_client_trades in the iam bundle.
+name: client_portfolio
+description: >
+  The clients the caller covers, with tier, segment and how many products each
+  subscribes to. The starting point for a coverage conversation.
+parameters:
+  - name: region
+    type: string
+    description: Filter to a region (EMEA, NAMR). Empty string returns all.
+    required: false
+    default: ""
+match: |
+  MATCH (caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(c:Client)
+  WHERE $region = '' OR c.region = $region
+  OPTIONAL MATCH (c)-[:SUBSCRIBES_TO]->(p:Product)
+scope: [c, p]
+return: |
+  RETURN c.name AS client, c.segment AS segment, c.region AS region,
+         c.tier AS tier, count(p) AS products
+  ORDER BY client
+read_only: true

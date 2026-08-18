@@ -388,8 +388,13 @@ def compose(
                 + "\n  RETURN " + ", ".join(inner_scope) + "\n}"
             )
     else:
+        # `caller` is imported alongside `authz` so a tool may scope its own
+        # match to the calling user — e.g. "the clients I cover". That is a
+        # BUSINESS scoping decision expressed in the query, distinct from
+        # `anchor:`, which is a performance optimisation that must not change
+        # which rows are entitled (see ANCHOR_SAFETY).
         body = (
-            "CALL {\n  WITH authz\n  " + match_clause.strip()
+            "CALL {\n  WITH authz, caller\n  " + match_clause.strip()
             + "\n  RETURN " + ", ".join(scope) + "\n}"
         )
     filt = build_filter(policy, scope, protect)

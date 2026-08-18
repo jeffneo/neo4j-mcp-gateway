@@ -1,0 +1,103 @@
+# Entitlement conformance for the client platform bundle.
+#
+# The negative assertions are the security tests. Run:
+#   ACTIVE_BUNDLE=client_platform uv run python scripts/check_entitlements.py
+
+cases:
+  # --- Coverage-derived access -----------------------------------------------
+  - name: coverage sees interactions for its own clients
+    principal: lena.fischer@bank.com
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Northwind Asset Management'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+    must_see: [INT-2001, INT-2002]
+
+  - name: coverage cannot see another team's client interactions
+    principal: evan.brooks@bank.com
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Northwind Asset Management'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+    must_not_see: [INT-2001, INT-2002]
+    expect_count: 0
+
+  - name: coverage colleagues on one team see the same interactions
+    same_for: [lena.fischer@bank.com, marc.dubois@bank.com]
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Northwind Asset Management'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+
+  # --- Authorship: a grant only a path can express ----------------------------
+  - name: the person who logged an interaction can read it without covering the client
+    principal: nadia.haddad@bank.com
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Kestrel Capital'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+    must_see: [INT-2006]
+    must_not_see: [INT-2003]
+
+  - name: covering that client still sees both interactions
+    principal: sofia.rossi@bank.com
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Kestrel Capital'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+    must_see: [INT-2003, INT-2006]
+
+  # --- Role-derived access ----------------------------------------------------
+  - name: a product specialist sees their own family across all coverage teams
+    principal: nadia.haddad@bank.com
+    tool: client_opportunities
+    id_field: product
+    must_see: [Portfolio Analytics Credit, Portfolio Analytics Equities, Market Dashboards]
+    must_not_see: [Electronic Execution]
+
+  - name: an execution specialist does not see analytics opportunities
+    principal: tomas.silva@bank.com
+    tool: client_opportunities
+    id_field: product
+    must_see: [Electronic Execution]
+    must_not_see: [Portfolio Analytics Credit, Market Dashboards]
+
+  - name: supervision sees the whole pipeline
+    principal: peter.lindqvist@bank.com
+    tool: client_opportunities
+    id_field: product
+    expect_count: 4
+
+  # --- Aggregates are per-entitlement, not firm-wide --------------------------
+  - name: pipeline value reflects only what the caller may see
+    principal: evan.brooks@bank.com
+    match: "MATCH (o:Opportunity)-[:FOR_CLIENT]->(c:Client)"
+    scope: [o, c]
+    protect: [o]
+    return: "RETURN sum(o.value) AS id"
+    id_field: id
+    must_see: [120000.0]
+
+  - name: supervision sees the full pipeline value
+    principal: peter.lindqvist@bank.com
+    match: "MATCH (o:Opportunity)-[:FOR_CLIENT]->(c:Client)"
+    scope: [o, c]
+    protect: [o]
+    return: "RETURN sum(o.value) AS id"
+    id_field: id
+    must_see: [900000.0]
+
+  # --- Reference data must flow, or joins break ------------------------------
+  - name: the product catalogue is reference data and visible to everyone
+    same_for: [evan.brooks@bank.com, nadia.haddad@bank.com, peter.lindqvist@bank.com]
+    match: "MATCH (x:Product)"
+    scope: [x]
+    return: "RETURN x.code AS id"
+    id_field: id
+
+  # --- Derived grants reproduce the materialised lists ------------------------
+  - name: derived grants agree with materialised lists for coverage callers
+    differential: true
+    principals: [lena.fischer@bank.com, evan.brooks@bank.com, sofia.rossi@bank.com]
+    tool: client_opportunities
+    id_field: product

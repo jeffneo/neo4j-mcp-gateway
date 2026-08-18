@@ -153,7 +153,13 @@ limits: [`docs/mediation-spec.md`](docs/mediation-spec.md).
 > property keys) but no row data. Add it to `downstream.hide` if your deployment
 > treats the schema itself as sensitive.
 
-Shipped bundles: **`ato`** (account-takeover; 7 YAML tools; `mode: open`) and
+Want to try the entitlement model on Aura?
+[`docs/entitlement-testing-tutorial.md`](docs/entitlement-testing-tutorial.md)
+walks through it across four identity/data topologies.
+
+Shipped bundles: **`ato`** (account-takeover; 7 YAML tools; `mode: open`),
+**`client_platform`** (institutional client platform, up/cross-sell;
+`mode: mediated`) and
 **`iam`** (investment-bank entitlements; `mode: mediated`, curated tools filtered
 per caller, raw `read-cypher` auto-hidden). Neither bundle contains security
 code — a bundle declares a policy and the engine enforces it.
