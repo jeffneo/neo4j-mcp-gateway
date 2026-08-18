@@ -274,3 +274,55 @@ cases:
     args: {client: Acme Corp}
     id_field: tradeId
     must_see: [TRD-3001]
+
+  # ---------------------------------------------------------------------------
+  # INVARIANTS — questions about the MODEL, not about a caller.
+  #
+  # These run unmediated against the whole graph, because their job is to see
+  # everything and report what should not be connected. No tool exposes them and
+  # the gateway never runs them; they belong in CI and in a control-room review.
+  # Each returns one row per violation, and `expect_count` says how many are
+  # tolerated.
+  # ---------------------------------------------------------------------------
+
+  # Every principal named in an access-control list must exist. A name that no
+  # longer resolves is a grant to nobody — harmless until the name is REUSED,
+  # at which point it silently becomes a grant to someone new.
+  - name: "invariant: every ACL entry names a principal that exists"
+    invariant: |
+      MATCH (n) WHERE n.`Permissions.Read` IS NOT NULL
+      UNWIND n.`Permissions.Read` AS entry
+      WITH DISTINCT entry
+      WHERE entry <> 'everyone'
+        AND NOT EXISTS { MATCH (g:AdGroup {name: entry}) }
+        AND NOT EXISTS { MATCH (u:User {email: entry}) }
+      RETURN entry AS danglingPrincipal
+    expect_count: 0
+
+  # A protected record nobody can read is usually a mistake — a row that fell out
+  # of the entitlement model rather than one deliberately sealed.
+  - name: "invariant: no protected record is unreachable by everyone"
+    invariant: |
+      MATCH (n) WHERE n.`Permissions.Read` IS NOT NULL
+      WITH n WHERE size(n.`Permissions.Read`) = 0
+      RETURN labels(n)[0] AS label, coalesce(n.tradeId, n.commId, n.dealId) AS id
+    expect_count: 0
+
+  # SEPARATION OF DUTY. Someone who both sits on a desk and holds a relationship
+  # to a client restricted FOR that desk holds the two halves of a barrier at
+  # once. No per-caller test can find this: it is a property of the graph rather
+  # than of any one request, and the filter correctly denies each individual read
+  # while the structural conflict quietly persists.
+  #
+  # expect_count is 1, not 0, and that is the point. Priya was already a
+  # participant on Zenith when the restriction was applied to her desk — which is
+  # exactly how this arises in practice, restrictions landing on relationships
+  # that already exist. Someone has to decide whether to unwind her involvement
+  # or accept it with reads denied. Recording the count makes that a REVIEWED
+  # decision and turns any SECOND bridge into a failed build.
+  - name: "invariant: no new bridge between a desk and a client restricted for it"
+    invariant: |
+      MATCH (u:User)-[:ON_DESK]->(d:Desk)<-[:RESTRICTED_FOR]-(c:Client)
+      MATCH (u)-[:PARTICIPANT_IN]->(:Communication)-[:WITH_CLIENT]->(c)
+      RETURN DISTINCT u.email AS bridges, d.name AS desk, c.name AS restrictedClient
+    expect_count: 1

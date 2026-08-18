@@ -218,6 +218,56 @@ live database, in addition to running every tool:
   indistinguishable from no filter, so each mediated tool is run as several real
   principals and the results compared.
 
+### Invariants
+
+Every other case asks *"what does this caller see?"* — per-caller, per-query,
+asserted against enumerated ids. An **invariant** asks a different kind of
+question: *"is there any entity for which the model is wrong?"* It quantifies
+over the whole graph and has no principal.
+
+```yaml
+- name: "invariant: every ACL entry names a principal that exists"
+  invariant: |
+    MATCH (n) WHERE n.`Permissions.Read` IS NOT NULL
+    UNWIND n.`Permissions.Read` AS entry
+    WITH DISTINCT entry
+    WHERE entry <> 'everyone'
+      AND NOT EXISTS { MATCH (g:AdGroup {name: entry}) }
+      AND NOT EXISTS { MATCH (u:User  {email: entry}) }
+    RETURN entry AS danglingPrincipal
+  expect_count: 0
+```
+
+Each returned row is a violation; `expect_count` says how many are tolerated.
+
+**It runs unmediated, and that is the point.** Composing an invariant through the
+entitlement filter would restrict it to some caller's entitlements — backwards,
+since its job is to see everything and report what should not be connected. It is
+therefore a declared exception to a mediated bundle's posture: no tool exposes
+one, and the gateway never runs them. They belong in CI and in a control-room
+review. Write clauses are refused.
+
+**`expect_count` is a baseline, not always zero.** The `iam` bundle carries a
+separation-of-duty invariant at `expect_count: 1` — one person was already a
+participant on a client when the restriction landed on their desk, which is
+precisely how these arise. The filter correctly denies each individual read while
+the structural conflict persists, and no per-caller test can see it. Recording
+the count makes it a *reviewed* decision and turns any second bridge into a
+failed build.
+
+**Invariants are graph-wide**, so in a database shared with another bundle they
+see that bundle's records too. Correct — the graph is shared — but a mediated
+bundle wanting clean invariants wants its own database, which the open/mediated
+safety rule already pushes toward.
+
+> Worth recording: the dangling-principal invariant above found a real bug on its
+> first run. `platform.cypher` derived ACL entries as `'product-' +
+> toLower(family)` and the catalogue has a Data family, but `identity.cypher`
+> created no `product-data` group. Every Data-product usage record carried a
+> grant to a principal that did not exist — harmless until the name is reused, at
+> which point it silently becomes a grant to someone new. Nine conformance cases
+> over that bundle had never touched it, because no caller's view was wrong.
+
 ### Conformance cases
 
 `scripts/check_entitlements.py` runs declarative cases from a bundle's

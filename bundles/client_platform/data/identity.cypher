@@ -37,6 +37,11 @@ UNWIND [
   {name:'product-research',    kind:'product',  label:'Research product specialists'},
   {name:'product-analytics',   kind:'product',  label:'Analytics product specialists'},
   {name:'product-execution',   kind:'product',  label:'Execution product specialists'},
+  // platform.cypher derives ACL entries as 'product-' + toLower(family), and the
+  // catalogue has a Data family (DAT-API, DAT-RISK). Without this group those
+  // entries name nobody — a grant to a principal that does not exist, harmless
+  // until the name is reused. Found by the dangling-principal invariant.
+  {name:'product-data',        kind:'product',  label:'Data and API product specialists'},
   {name:'platform-admin',      kind:'control',  label:'Platform administration'},
   {name:'compliance-review',   kind:'control',  label:'Supervisory review'}
 ] AS g

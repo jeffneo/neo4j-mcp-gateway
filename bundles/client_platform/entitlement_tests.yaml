@@ -101,3 +101,35 @@ cases:
     principals: [lena.fischer@bank.com, evan.brooks@bank.com, sofia.rossi@bank.com]
     tool: client_opportunities
     id_field: product
+
+  # ---------------------------------------------------------------------------
+  # INVARIANTS — questions about the model, not about a caller. These run
+  # unmediated over the whole graph, so in a database shared with another bundle
+  # they see that bundle's records too. That is correct — the graph is shared —
+  # but it means a mediated bundle wanting clean invariants wants its own
+  # database, which the gateway's open/mediated safety rule already pushes toward.
+  # ---------------------------------------------------------------------------
+
+  # This one found a real bug on its first run: platform.cypher derives ACL
+  # entries as 'product-' + toLower(family) and the catalogue has a Data family,
+  # but identity.cypher created no product-data group. Every Data-product usage
+  # record carried a grant to a principal that did not exist.
+  - name: "invariant: every ACL entry names a principal that exists"
+    invariant: |
+      MATCH (n) WHERE n.`Permissions.Read` IS NOT NULL
+      UNWIND n.`Permissions.Read` AS entry
+      WITH DISTINCT entry
+      WHERE entry <> 'everyone'
+        AND NOT EXISTS { MATCH (g:AdGroup {name: entry}) }
+        AND NOT EXISTS { MATCH (u:User {email: entry}) }
+      RETURN entry AS danglingPrincipal
+    expect_count: 0
+
+  # Every coverage team named on a client must exist as a group, or that client's
+  # records are governed by a team nobody belongs to.
+  - name: "invariant: every client's coverage team exists"
+    invariant: |
+      MATCH (c:Client) WHERE c.coverageTeam IS NOT NULL
+      AND NOT EXISTS { MATCH (g:AdGroup {name: c.coverageTeam}) }
+      RETURN c.name AS client, c.coverageTeam AS missingTeam
+    expect_count: 0

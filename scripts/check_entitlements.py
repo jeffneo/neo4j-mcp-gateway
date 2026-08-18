@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import re
 import sys
 from pathlib import Path
 
@@ -185,8 +186,62 @@ def _check_assertions(case: dict, principal: str, seen: list) -> list[str]:
     return failures
 
 
+# INVARIANTS
+# ----------
+# Every other case here asks "what does THIS caller see?" — per-caller,
+# per-query, and asserted against an enumerated set of ids. An invariant asks a
+# different kind of question: "is there ANY entity for which the model is wrong?"
+# It quantifies over the whole graph and has no principal at all.
+#
+# Two things follow, and the second is the interesting one:
+#
+#   1. There is no caller, so there is nothing to filter against.
+#   2. It must run UNMEDIATED. Composing an invariant through the entitlement
+#      filter would restrict it to some caller's entitlements — which is exactly
+#      backwards, because the invariant's whole job is to see everything and
+#      report the parts that should not be connected.
+#
+# That makes an invariant a declared exception to a mediated bundle's posture,
+# so it is named as one in the output rather than passing quietly. These belong
+# in CI and in a control-room review, not on the served surface: no tool exposes
+# them, and the gateway never runs them.
+#
+# The shape they check is the one no per-caller test can reach — a barrier that
+# is porous somewhere nobody modelled, a person who bridges two segregated
+# desks, an access-control list naming a principal that no longer exists.
+_INVARIANT_BLOCKED = re.compile(
+    r"\b(create|merge|delete|set|remove|drop|alter|grant|deny|revoke|load\s+csv|"
+    r"detach)\b|\bcall\s+(dbms|apoc)\.")
+
+
+def run_invariant(executor, case: dict, verbose: bool) -> tuple[bool, list[str]]:
+    name = case.get("name", "<unnamed>")
+    query = str(case.get("invariant") or "").strip()
+    if _INVARIANT_BLOCKED.search(query.lower()):
+        raise CaseError(f"{name}: an invariant must be a read-only query")
+    expected = int(case.get("expect_count", 0))
+
+    rows = executor.run(query, case.get("args") or {}, read_only=True)
+    if len(rows) == expected:
+        if verbose and rows:
+            print(f"      {len(rows)} row(s), as expected")
+        return True, []
+
+    # Show a few offenders: for an invariant, WHICH entities violate it is the
+    # entire value. Capped, because a broken invariant can match a lot.
+    sample = [", ".join(f"{k}={v}" for k, v in row.items()) for row in rows[:5]]
+    detail = [f"expected {expected} violation(s), found {len(rows)}"]
+    detail += [f"    {s}" for s in sample]
+    if len(rows) > 5:
+        detail.append(f"    … and {len(rows) - 5} more")
+    return False, detail
+
+
 def run_case(executor, config, policy, specs: dict, case: dict, verbose: bool) -> tuple[bool, list[str]]:
     name = case.get("name", "<unnamed>")
+    if case.get("invariant"):
+        return run_invariant(executor, case, verbose)
+
     id_field = case.get("id_field")
     if not id_field:
         raise CaseError(f"{name}: 'id_field' is required (the column identifying a row)")
