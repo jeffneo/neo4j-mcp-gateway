@@ -30,16 +30,53 @@ relationship. That is what makes the separated topologies below possible, so loa
 
 ## Which topology to try
 
-| | Identity and business data | Aura instances | Works today |
+| | Arrangement | Aura instances | Works today |
 | --- | --- | --- | --- |
-| **A** | one graph, intermingled | 1 | ✅ |
+| **A** | one graph, identity and business data intermingled | 1 | ✅ |
 | **B** | one graph, distinct subgraphs joined at defined seams | 1 | ✅ |
-| **C** | separate databases, one per bundle | 2 | ✅ |
-| **D** | identity in a *different* database from the data it protects | 2 | ❌ see below |
+| **C** | two business domains, **each with its own copy of identity** | 2 | ✅ |
+| **D** | identity in **one** database, the data it protects in **another** | 2 | ❌ |
 
 A and B are the same physically and differ in modelling discipline; B is what you
 would actually govern. C is the multi-bundle setup. D is the one to understand
 before promising it to anyone.
+
+### C and D are not "one instance vs two" — read this before skipping
+
+Both C and D use two instances, so the instance count is not what separates them.
+**What separates them is whether a single query has to cross the boundary.**
+
+```
+  C — works                              D — does not work
+  ┌── instance 1 ──────────┐             ┌── instance 1 ─────┐
+  │ client platform data   │             │ identity graph    │
+  │ + identity  (a copy)   │             │ (only)            │
+  └────────────────────────┘             └───────────────────┘
+  ┌── instance 2 ──────────┐             ┌── instance 2 ─────┐
+  │ iam data               │             │ business data     │
+  │ + identity  (a copy)   │             │ (only)            │
+  └────────────────────────┘             └───────────────────┘
+  Every query resolves the caller        Resolving the caller and reading the
+  and reads the data in ONE place.       data are in DIFFERENT places, and one
+  The boundary is between DOMAINS.       Cypher statement cannot span them.
+```
+
+In C the identity graph is **replicated** — instance 1 and instance 2 each hold
+their own copy, so each is independently self-sufficient. The split is *domain vs
+domain*: client-platform data over here, IAM data over there, neither needing the
+other. That is why it works, and it is why `identity.cypher` is a standalone file
+you can run against as many instances as you like.
+
+In D the identity graph is **not** replicated: it lives in one instance and is
+expected to authorize data sitting in another. Mediation composes a *single*
+Cypher statement — resolve the caller, run the query, filter the results — and a
+statement cannot traverse two databases, so the authorization prelude has nothing
+to resolve against.
+
+The distinction is worth being precise about in an architecture conversation,
+because "put identity in its own database" sounds like good hygiene and is the
+one arrangement that does not work. The fix is not architectural purity; it is
+**replication** (C) or one of the two options in the D section below.
 
 ---
 
@@ -175,8 +212,9 @@ subgraphs, joined only at seams you can enumerate and test.
 
 ## Topology C — two Aura instances, one bundle each
 
-Each bundle carries its own connection, so two bundles can sit on two instances.
-Put a git-ignored `.env` in each bundle directory:
+Two **business domains** on two instances, each instance holding its own copy of
+the identity graph. Each bundle carries its own connection, so put a git-ignored
+`.env` in each bundle directory:
 
 ```bash
 # bundles/client_platform/.env
@@ -208,10 +246,25 @@ own connection. Validate each in turn:
 ACTIVE_BUNDLE=client_platform,iam uv run python scripts/validate_bundle.py
 ```
 
-**Each instance needs its own identity data.** In this topology the identity
-graph is replicated into every instance that must enforce against it, because a
-query cannot span instances. That is a real production pattern — identity synced
-into each domain database — and it is why `identity.cypher` is a standalone file.
+**Each instance needs its own identity data** — run `identity.cypher` against
+both. This is the load-bearing difference from topology D: the identity graph is
+replicated into every instance that must enforce against it, so no query ever has
+to cross the boundary. That is a real production pattern — identity synced into
+each domain database — and it is why `identity.cypher` is a standalone file with
+no dependency on any particular business dataset.
+
+Prove the replication is doing the work: drop identity from one instance and
+watch that bundle's callers fall to zero rows while the other bundle is
+unaffected.
+
+```cypher
+// against the client_platform instance only
+MATCH (n {source:'cp-identity'}) DETACH DELETE n;
+```
+
+`check_entitlements.py` then fails `must_see` on every client_platform case while
+the `iam` bundle keeps passing — the two instances are genuinely independent.
+Reload `identity.cypher` to restore it.
 
 > The gateway **refuses to start** if an `open` bundle and a `mediated` bundle
 > resolve to the same database, since the open bundle's unfiltered tools would
@@ -249,6 +302,99 @@ groups into the identity instance and silently create **no seams** — there are
 no business data, and `check_entitlements.py` reports `must_see` failures rather
 than anything dangerous. It fails closed, which is the right direction, but it
 fails.
+
+---
+
+## The hard entitlement scenarios
+
+The `client_platform` bundle above demonstrates coverage, product roles and
+authorship. The three scenarios that decide whether a model is credible on a
+sales-and-trading floor live in the **`iam`** bundle, and each is already a
+conformance case rather than a story. Load it and run them:
+
+```bash
+cypher-shell -a "$NEO4J_URI" -u "$NEO4J_USERNAME" -p "$NEO4J_PASSWORD" \
+  -f bundles/iam/data/iam_demo.cypher
+
+ACTIVE_BUNDLE=iam uv run python scripts/check_entitlements.py
+```
+
+Expect **22 passed, 0 failed**. What those cases prove:
+
+| # | Scenario | Cases | The hard part |
+| --- | --- | --- | --- |
+| 1 | **Private client communication.** A salesperson's direct 1:1 with a client is readable by the participants, *not* by the rest of the coverage team. | `participant sees their own private client chat`, `coverage colleague cannot see a private 1:1 chat`, `unrelated coverage sees no Acme communications` | Two records on the same client differ in visibility: `COMM-1002` (team email thread) reaches the coverage group, `COMM-1001` (1:1 chat) reaches only Anna. **Entitlement is per-record, not per-client** — any model that grants at the client level fails here. |
+| 2 | **Coverage parity.** Two salespeople covering the same corporate see *exactly* the same request book. | `coverage team members see an identical request book`, `coverage parity holds on the anchored tool` | Asserted as set equality between principals (`same_for`), not as a count. Divergence between two people who should be identical is the failure mode that erodes trust in an entitlement system, and it is invisible to per-user spot checks. |
+| 3 | **Booked trade.** A trade booked by one salesperson on behalf of a client. | `booker sees the trade they booked`, `coverage team sees the client trade`, `owning desk sees the trade`, `settlements sees the trade`, `unrelated coverage cannot see the trade`, `private side cannot see markets trades` | Five *different* routes to one record — booker, coverage, desk, settlements, supervision — and two negative controls. The negatives are the test; the positives are easy. |
+
+A fourth scenario nobody asks for up front but everyone raises in review:
+
+| 4 | **Information barrier.** A wall-crossed deal is need-to-know, and broad rights in one domain must not imply access in another. | `named deal team sees the wall-crossed deal`, `supervision does not cross the information barrier`, `sales cannot see the wall-crossed deal` | Supervision sees every communication firm-wide **and still cannot see the deal**. This is the case that shows the model expresses restriction, not just accumulation — a role-hierarchy model where "supervisor ⊇ everyone" cannot represent it at all. |
+
+### Seeing scenario 1 for yourself
+
+Two communications with the same client, two different shapes of entitlement:
+
+```cypher
+MATCH (c:Communication)
+OPTIONAL MATCH (u:User)-[:PARTICIPANT_IN]->(c)
+RETURN c.commId AS id, c.channel AS channel,
+       c.`Permissions.Read` AS acl, collect(u.email) AS participants
+ORDER BY id;
+```
+
+```
+"COMM-1001", "chat",  ["anna.ross@bank.com", "compliance-supervision"], ["anna.ross@bank.com"]
+"COMM-1002", "email", ["coverage-acme",      "compliance-supervision"], ["anna.ross@…","joe.hart@…","sam.diaz@…"]
+```
+
+`COMM-1002` is a team email thread whose ACL names a *group*. `COMM-1001` is a
+1:1 chat whose ACL names an *individual* — which is exactly the entry that has to
+be written, and later revoked, for every private conversation on the floor. Ask
+why each is visible:
+
+```bash
+ACTIVE_BUNDLE=iam uv run python - <<'EOF'
+import asyncio, warnings; warnings.simplefilter("ignore")
+from gateway.config import Config
+from gateway.yaml_tools import Neo4jExecutor
+from gateway.security_tools import build_explain_access
+c = Config.from_env(); ex = Neo4jExecutor(c)
+fn = build_explain_access(c, ex).fn
+async def main():
+    for res in ["COMM-1001", "COMM-1002"]:
+        for who in ["anna.ross@bank.com", "joe.hart@bank.com"]:
+            r = await fn(resource=res, principal=who)
+            print(f"{res}  {who:22} -> {'GRANTED' if r['granted'] else 'no access'}")
+            for g in r.get("grantedBy", []):
+                print("        ", g["reason"])
+asyncio.run(main())
+EOF
+```
+
+```
+COMM-1001  anna.ross@bank.com     -> GRANTED
+             was a participant in the conversation
+COMM-1001  joe.hart@bank.com      -> no access
+COMM-1002  anna.ross@bank.com     -> GRANTED
+             was a participant in the conversation
+COMM-1002  joe.hart@bank.com      -> GRANTED
+             was a participant in the conversation
+```
+
+This is the clearest argument for path grants. Joe covers the same client as
+Anna, and on `COMM-1001` he correctly sees nothing. On `COMM-1002` the engine
+does not fall back to the group ACL at all — it answers **"was a participant"**,
+because participation is a relationship that already exists in the graph. The
+`PARTICIPANT_IN` edge is written once when the conversation happens; no ACL entry
+has to be minted per participant per conversation, and none has to be revoked
+when someone leaves the desk.
+
+> **Running iam and client_platform in one database will mix the two identity
+> graphs** — both create `User` and `AdGroup` nodes, and `entitlement_directory`
+> will then list groups from both. For the scenarios above that is harmless, but
+> use separate instances (topology C) if you want either bundle's directory
+> output to look clean.
 
 ---
 

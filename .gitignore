@@ -1,8 +1,13 @@
-# Secrets — ignore every .env variant EXCEPT the checked-in example
-# (the bare `.env` pattern also matches per-bundle bundles/*/.env)
+# Secrets — ignore every .env variant EXCEPT the checked-in example.
+#
+# A pattern with no slash matches by BASENAME AT ANY DEPTH, so these three lines
+# cover per-bundle files too: bundles/<name>/.env and bundles/<name>/.env.local
+# are ignored, while bundles/<name>/.env.example stays committable. Verify with:
+#   git check-ignore -v bundles/<name>/.env
 .env
 .env.*
 !.env.example
+.envrc
 
 # Python / uv
 .venv/
