@@ -385,22 +385,75 @@ def split_anchor(policy: SecurityPolicy, variable: str, pattern: str) -> tuple[s
     return data_pattern, predicate
 
 
-def grant_test(policy: SecurityPolicy, via: str, var: str,
-               resource_label: str = "") -> str:
-    """The EXISTS test proving one grant reaches ``var``.
+def rule_test(policy: SecurityPolicy, rule, var: str) -> str:
+    """The boolean test for one grant or denial against ``var``.
 
-    Co-located, this is the grant pattern as authored. With identity in a separate
-    constituent it is the data-side half, re-rooted at a proxy node — see
-    GRANT_SPLITTING. Same semantics, same answer; only the starting point moves
-    from the caller NODE to a caller-derived VALUE.
+    Three shapes, and a rule may combine the first two:
+
+    * ``via`` only    — pure reachability: is there a path from the caller?
+    * ``where`` only  — pure row condition, no traversal at all.
+    * both            — the condition is evaluated inside the traversal.
+
+    Co-located, ``via`` is the pattern as authored. With identity separated it is
+    the data-side half, re-rooted at a proxy — see GRANT_SPLITTING. Same
+    semantics either way; only the starting point moves from the caller NODE to a
+    caller-derived VALUE.
     """
+    cond = _bind(rule.where, var) if rule.where else ""
+    if not rule.via:
+        # No traversal: the rule is a statement about the row itself.
+        return f"({cond})"
+
     if policy.identity.source == SOURCE_GRAPH:
-        return f"EXISTS {{ MATCH {_bind(via, var)} }}"
-    pattern, predicate = split_grant(policy, via, resource_label)
+        inner = f"MATCH {_bind(rule.via, var)}"
+        return f"EXISTS {{ {inner}{f' WHERE {cond}' if cond else ''} }}"
+
+    pattern, predicate = split_grant(policy, rule.via, rule.label)
+    predicate = _bind(predicate, var)
+    if cond:
+        predicate = f"{predicate} AND {cond}"
     if not pattern:
         # Property cut landing on the row itself — a bare comparison, no subquery.
-        return f"({_bind(predicate, var)})"
-    return f"EXISTS {{ MATCH {_bind(pattern, var)} WHERE {_bind(predicate, var)} }}"
+        return f"({predicate})"
+    return f"EXISTS {{ MATCH {_bind(pattern, var)} WHERE {predicate} }}"
+
+
+# DENIALS
+# -------
+# A denial is evaluated exactly like a grant and then inverted. Two properties
+# make it a security control rather than a convenience:
+#
+#   DENY WINS. The test is `(granted) AND NOT (denied)`, so a matching denial
+#   removes the row whether or not a grant also matched. "Granted, then withdrawn"
+#   is a different fact from "never granted" — a restricted list revokes access
+#   someone genuinely had, and the audit story differs accordingly.
+#
+#   A DENIAL THAT DOES NOT MATCH DOES NOT FIRE — including when its predicate
+#   evaluates to NULL. An earlier version of this treated NULL as "deny", on the
+#   reasoning that an undecidable revocation should revoke. That is wrong in
+#   Cypher's three-valued logic, and unusably so: an ABSENT property yields NULL,
+#   so `where: "resource.restricted = true"` denied every row whose property was
+#   simply not set — which is every unrestricted row. Absence is not ambiguity.
+#   Each rule is therefore wrapped in `coalesce(..., false)`.
+#
+#   The consequence for authors: where absence SHOULD deny, say so in the
+#   predicate — `coalesce(resource.clearance, 0) < 3`, not `resource.clearance
+#   < 3`. That is the same obligation a grant already carries, and it is checkable
+#   in a conformance case; a rule that silently denies everything is not.
+#
+# The `var IS NULL` guard comes first so an OPTIONAL MATCH that produced no node
+# is not treated as a denial — consistent with the rest of the filter, where a
+# null variable never removes a row.
+def _denial_test(policy: SecurityPolicy, var: str) -> str:
+    by_label: dict[str, list[str]] = {}
+    for rule in policy.denials:
+        by_label.setdefault(rule.label, []).append(
+            f"coalesce({rule_test(policy, rule, var)}, false)")
+    if not by_label:
+        return ""
+    denied = " OR ".join(f"({var}:{label} AND ({' OR '.join(tests)}))"
+                         for label, tests in by_label.items())
+    return f"({var} IS NULL OR NOT coalesce({denied}, false))"
 
 
 def _path_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
@@ -414,8 +467,7 @@ def _path_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
     """
     by_label: dict[str, list[str]] = {}
     for grant in policy.grants:
-        by_label.setdefault(grant.label, []).append(
-            grant_test(policy, grant.via, var, grant.label))
+        by_label.setdefault(grant.label, []).append(rule_test(policy, grant, var))
 
     governed = sorted(set(policy.protected_labels) | set(by_label))
     if not governed:
@@ -434,6 +486,12 @@ def _path_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
 
 
 def _variable_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
+    granted = _granted_test(policy, var, strict)
+    denied = _denial_test(policy, var)
+    return f"({granted} AND {denied})" if denied else granted
+
+
+def _granted_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
     model = policy.grant_model
     if model == "property":
         return _property_test(policy, var, strict)
@@ -805,6 +863,21 @@ def prelude_only_query(policy: SecurityPolicy) -> str:
 # right trade: a caller learns why they CAN see something, never that something
 # they cannot see is there.
 
+
+def _rule_case_list(policy: SecurityPolicy, rules, label: str, base=None) -> str:
+    """A Cypher list of the indexes of whichever rules match, for explanations.
+
+    Indexes are positions in ``base`` (the full declared list) so an explanation
+    can name the rule that fired, even when only a subset is being tested here.
+    """
+    base = rules if base is None else base
+    arms = [f"      CASE WHEN {rule_test(policy, r, 'resource')} THEN {base.index(r)} ELSE null END"
+            for r in rules if r.label == label]
+    if not arms:
+        return "[]"
+    return "[x IN [\n" + ",\n".join(arms) + "\n    ] WHERE x IS NOT NULL | x]"
+
+
 def explain_query(policy: SecurityPolicy, label: str, key_property: str) -> str:
     """Find one row and report which declared grants reach it from the caller.
 
@@ -824,17 +897,12 @@ def explain_query(policy: SecurityPolicy, label: str, key_property: str) -> str:
         # one is a data-side traversal, so provenance survives. The matched PATH is
         # not rendered, because the identity-side prefix was resolved elsewhere and
         # is not walked here.
-        arms = [
-            f"      CASE WHEN {grant_test(policy, g.via, 'resource', g.label)} THEN {i} ELSE null END"
-            for i, g in enumerate(policy.grants) if g.label == label
-        ]
-        matched = (
-            "[x IN [\n" + ",\n".join(arms)
-            + "\n    ] WHERE x IS NOT NULL | {idx: x, nodes: [], rels: []}]"
-        ) if arms else "[]"
+        matched = _rule_case_list(policy, policy.grants, label)
+        denied = _rule_case_list(policy, policy.denials, label)
         lookup = f"""  MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
   RETURN resource,
-    {matched} AS matched,
+    [x IN {matched} | {{idx: x, nodes: [], rels: []}}] AS matched,
+    {denied} AS denied,
     [x IN coalesce(resource.`@@PERM_PROP@@`, [])
        WHERE x IN authz.authzPrincipals] AS aclMatches"""
         # The subquery must import authz explicitly — the grant tests reference it.
@@ -845,14 +913,23 @@ CALL {{
 {use}  WITH authz
 {lookup}
 }}
-RETURN matched, aclMatches, authz.authzPrincipals AS principals""", policy)
+RETURN matched, denied, aclMatches, authz.authzPrincipals AS principals""", policy)
 
+    # Only via-bearing grants can render a PATH. A grant that is a pure row
+    # condition still has to be reported, so it goes through the same CASE list
+    # the separated sources use, with no path to show.
     arms = [
         f"  WITH caller, resource\n"
         f"  OPTIONAL MATCH grantPath = {_bind(grant.via, 'resource')}\n"
         f"  RETURN {i} AS idx, grantPath AS p LIMIT 1"
-        for i, grant in enumerate(policy.grants) if grant.label == label
+        for i, grant in enumerate(policy.grants)
+        if grant.label == label and grant.via and not grant.where
     ]
+    conditional = [g for g in policy.grants
+                   if g.label == label and (g.where or not g.via)]
+    extra = (_rule_case_list(policy, conditional, label, policy.grants)
+             if conditional else "[]")
+    denied = _rule_case_list(policy, policy.denials, label)
 
     if arms:
         collect = ("CALL {\n" + "\n  UNION\n".join(arms) + "\n}\n"
@@ -874,7 +951,8 @@ MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
 WITH caller, authz, resource
 {collect}
 RETURN
-  {matched} AS matched,
+  {matched} + [x IN {extra} | {{idx: x, nodes: [], rels: []}}] AS matched,
+  {denied} AS denied,
   [x IN coalesce(resource.`@@PERM_PROP@@`, [])
      WHERE x IN authz.authzPrincipals] AS aclMatches,
   authz.authzPrincipals AS principals""".replace(

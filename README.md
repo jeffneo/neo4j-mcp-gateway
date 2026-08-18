@@ -139,6 +139,28 @@ Cypher is generated at runtime — the stance for regulated workflows. The env
 variable can only tighten: a bundle declaring curated-only cannot be re-opened
 from the shell.
 
+**Denials withdraw access someone otherwise holds.** A restricted list is not the
+absence of a grant — coverage still covers the client — so it cannot be modelled
+by deleting one. Grants and denials share a shape: `via` (a path from the caller),
+`where` (a condition on the row), or both.
+
+```yaml
+grants:
+  - label: Trade
+    via: "(caller)-[:ON_DESK]->(:Desk)<-[:BOOKED_ON]-(resource)"
+    where: "resource.notional < 50000000"     # a condition on the ROW
+denials:
+  - label: Trade
+    where: "resource.restricted = true"
+    reason: "the trade is flagged restricted"
+```
+
+The test is `(granted) AND NOT (denied)` — **deny always wins**, and
+`explain-access` reports which grants matched but were overridden. A denial whose
+predicate is `NULL` does *not* fire, because an absent property yields `NULL` and
+absence is not ambiguity; where absence should deny, write
+`coalesce(resource.clearance, 0) < 3`.
+
 Declare `protected_labels` so [`scripts/validate_bundle.py`](scripts/validate_bundle.py)
 fails when a business record is missing its access-control list — otherwise such a
 record silently flows to everyone. The validator also persona-diffs mediated tools

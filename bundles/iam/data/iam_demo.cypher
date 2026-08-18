@@ -49,6 +49,7 @@ CREATE CONSTRAINT iam_comm_id     IF NOT EXISTS FOR (c:Communication) REQUIRE c.
 CREATE CONSTRAINT iam_request_id  IF NOT EXISTS FOR (r:Request)       REQUIRE r.requestId IS UNIQUE;
 CREATE CONSTRAINT iam_trade_id    IF NOT EXISTS FOR (t:Trade)         REQUIRE t.tradeId IS UNIQUE;
 
+
 MATCH (n {source:'iam-demo'}) DETACH DELETE n;
 
 // ---------- Entitlement groups ----------
@@ -225,5 +226,31 @@ CREATE (n:ResearchNote {noteId:'RES-5001', title:'EMEA rates daily commentary',
 SET n.`Permissions.Read` = ['everyone'];
 
 // ---------- Summary ----------
+// Promote the desk property to a relationship, so desk-scoped rules (like the
+// restricted list below) are expressible as paths rather than property matching.
+MATCH (u:User) WHERE u.desk IS NOT NULL
+MERGE (d:Desk {name: u.desk})
+ON CREATE SET d.source = 'iam-demo'
+MERGE (u)-[:ON_DESK]->(d);
+
+// ---------- Restricted list ----------
+// A client under a research/trading restriction. This is NOT the absence of a
+// grant — coverage still legitimately covers Acme, and the ACLs still name their
+// team. The restriction WITHDRAWS access that people genuinely hold, which is
+// why it is expressed as a denial rather than by removing a grant.
+//
+// Scoped to a desk, as a real grey list is: the barred desk cannot see the
+// client's communications even though its members cover the client.
+//
+// Deliberately NOT Acme Corp — that client carries the private-chat scenario, and
+// a restriction there would withdraw the very records that scenario exists to
+// demonstrate. A restricted list is a separate fact and gets its own client.
+MATCH (c:Client {name:'Zenith Industries'}), (d:Desk {name:'FX EMEA'})
+MERGE (c)-[:RESTRICTED_FOR]->(d);
+
+// One trade flagged directly, to exercise a denial that is a pure row condition
+// with no traversal at all.
+MATCH (t:Trade {tradeId:'TRD-3002'}) SET t.restricted = true;
+
 MATCH (n {source:'iam-demo'})
 RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC, label;

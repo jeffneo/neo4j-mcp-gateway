@@ -206,6 +206,23 @@ def build_explain_access(config: Config, executor: Neo4jExecutor, prefix: str = 
             acl = row.get("aclMatches") or []
             granted = bool(reasons) if policy.grant_model == "path" else bool(reasons or acl)
 
+            # A denial overrides everything. Report it as its own outcome rather
+            # than as "no grant reached this", because "granted then withdrawn" is
+            # a different fact from "never granted" — which is the whole point of
+            # having denials, and exactly what an audit reviewer needs to see.
+            denials = [policy.denials[i] for i in (row.get("denied") or [])
+                       if isinstance(i, int) and i < len(policy.denials)]
+            if denials:
+                return {
+                    "principal": principal, "resource": resource_id, "label": label,
+                    "granted": False,
+                    "deniedBy": [{"reason": d.reason or f"a denial declared on {d.label}"}
+                                 for d in denials],
+                    "grantedBy": reasons,
+                    "note": ("Access was withdrawn by a denial. Any grants listed under "
+                             "grantedBy did match — a denial overrides them."),
+                }
+
             if not granted:
                 break  # fall through to the indistinguishable answer below
 

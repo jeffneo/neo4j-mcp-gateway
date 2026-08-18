@@ -145,6 +145,66 @@ records calls `ToolContext.secure_run()`
 is permitted for reference data but is recorded, and the server warns at startup
 when a mediated bundle's code tools took an unfiltered path.
 
+## 4b. Denials and row conditions
+
+A grant and a denial have the same shape and are evaluated the same way. A rule
+needs at least one of `via` (a path from the caller to the row) and `where` (a
+condition on the row); a rule with only `where` needs no traversal at all.
+
+```yaml
+grants:
+  - label: Trade
+    via: "(caller)-[:ON_DESK]->(:Desk)<-[:BOOKED_ON]-(resource)"
+    where: "resource.notional < 50000000"
+    reason: "on the booking desk, within the desk notional limit"
+
+denials:
+  - label: Communication
+    via: "(caller)-[:ON_DESK]->(:Desk)<-[:RESTRICTED_FOR]-(:Client)<-[:WITH_CLIENT]-(resource)"
+    reason: "the client is on the restricted list for this caller's desk"
+  - label: Trade
+    where: "resource.restricted = true"
+    reason: "the trade is flagged restricted"
+```
+
+The composed test per variable is **`(granted) AND NOT (denied)`**.
+
+**Why denials are not just "remove the grant".** A restricted list withdraws
+access someone genuinely holds. In the `iam` bundle, `priya` is a *participant*
+in `COMM-1003` — a path grant, the strongest route the model has — and the
+restriction on her desk removes it anyway. There is no grant to delete: hers is
+correct and should stay. "Granted, then withdrawn" and "never granted" are
+different facts with different audit stories, and `explain-access` reports them
+differently:
+
+```
+COMM-1003  priya  granted=False  DENIED BY: the client is on the restricted list for this caller's desk
+    (grants that DID match but were overridden: ['was a participant in the conversation'])
+```
+
+**NULL does not deny.** An absent property yields `NULL` in Cypher, so a denial
+written `resource.restricted = true` evaluates to `NULL` on every row that simply
+has no such property. An earlier version of this treated `NULL` as "deny" on the
+reasoning that an undecidable revocation should revoke; the result denied every
+unrestricted row. Absence is not ambiguity. Each rule is wrapped in
+`coalesce(..., false)`.
+
+> Where absence *should* deny, write it into the predicate:
+> `coalesce(resource.clearance, 0) < 3`, not `resource.clearance < 3`. A
+> conformance case can check that; a rule that silently denies everything cannot
+> be distinguished from a caller who is entitled to nothing.
+
+**Both fields are interpolated into Cypher**, so both are author-trusted config at
+the same level as a tool's own query, and both are validated at load: no clause
+keywords, no semicolons, a `via` must bind `resource`, and a `where` must
+reference `resource` when there is no `via` (otherwise it would apply to every row
+of that label regardless of which one). A `where` may reference `caller` only
+when identity is co-located — a separated source has no caller node in the data
+query, and the engine says so rather than failing at query time.
+
+Denials split at the identity/data boundary exactly like grants, so they work
+under every identity source.
+
 ## 5. Validation
 
 `scripts/validate_bundle.py` performs two entitlement-specific checks against a

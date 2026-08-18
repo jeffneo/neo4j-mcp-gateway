@@ -217,3 +217,60 @@ cases:
     scope: [x]
     return: "RETURN x.commId AS id"
     id_field: id
+
+  # ---------------------------------------------------------------------------
+  # Denials — rules that WITHDRAW access someone otherwise holds. A restricted
+  # list is not the absence of a grant: coverage still covers Acme and the ACLs
+  # still name their team. Removing a grant could not express this.
+  # ---------------------------------------------------------------------------
+  # Priya is a PARTICIPANT in COMM-1003 — a path grant, the strongest route the
+  # model has — and Zenith is restricted for her desk. She loses it. That is the
+  # case that proves deny beats grant rather than merely coinciding with the
+  # absence of one: removing a grant could not have expressed this, because the
+  # grant is genuinely hers.
+  - name: a denial overrides a grant the caller genuinely holds
+    principal: priya.natarajan@bank.com
+    match: "MATCH (x:Communication)-[:WITH_CLIENT]->(:Client {name: 'Zenith Industries'})"
+    scope: [x]
+    return: "RETURN x.commId AS id"
+    id_field: id
+    must_not_see: [COMM-1003]
+    expect_count: 0
+
+  - name: the restriction is desk-scoped and does not reach supervision
+    principal: maria.chen@bank.com
+    match: "MATCH (x:Communication)-[:WITH_CLIENT]->(:Client {name: 'Zenith Industries'})"
+    scope: [x]
+    return: "RETURN x.commId AS id"
+    id_field: id
+    must_see: [COMM-1003]
+
+  # A restriction on one client must not bleed into another. Note these two
+  # callers legitimately differ here — that is scenario 1, the private 1:1 — so
+  # this asserts each one's own book rather than parity between them.
+  - name: the restriction does not touch the unrestricted client
+    principal: joe.hart@bank.com
+    match: "MATCH (x:Communication)-[:WITH_CLIENT]->(:Client {name: 'Acme Corp'})"
+    scope: [x]
+    return: "RETURN x.commId AS id"
+    id_field: id
+    must_see: [COMM-1002]
+    must_not_see: [COMM-1001]
+
+  - name: a row-condition denial removes the flagged trade from supervision
+    principal: maria.chen@bank.com
+    tool: client_activity
+    args: {client: Acme Corp}
+    id_field: tradeId
+    must_not_see: [TRD-3002]
+
+  # REGRESSION GUARD. An absent property yields NULL in Cypher, and an earlier
+  # version treated a NULL denial predicate as "deny" — which denied every row
+  # whose property was simply not set. TRD-3001 has no `restricted` property at
+  # all, so it must survive a denial written as `resource.restricted = true`.
+  - name: a denial predicate that is NULL does not deny
+    principal: anna.ross@bank.com
+    tool: client_activity
+    args: {client: Acme Corp}
+    id_field: tradeId
+    must_see: [TRD-3001]
