@@ -146,7 +146,9 @@ to prove the filter actually discriminates between callers.
 
 New to this? [`docs/entitlement-model-brief.md`](docs/entitlement-model-brief.md)
 explains the model conceptually in about three minutes. Full reference and known
-limits: [`docs/mediation-spec.md`](docs/mediation-spec.md).
+limits: [`docs/mediation-spec.md`](docs/mediation-spec.md). What each entitlement
+model costs the data pipeline — what must be ingested, by whom, and what breaks
+when it is late: [`docs/data-ingestion.md`](docs/data-ingestion.md).
 
 > **Note:** `get-schema` stays exposed even under `mediated`, because
 > text-to-Cypher needs it. It reveals structure (labels, relationship types,

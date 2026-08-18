@@ -299,6 +299,55 @@ Consequence for how this is described: "separating identity costs you anchoring"
 was wrong. What separation costs is replication surface — proxies for every node
 a grant or anchor traverses — plus tools that reference `caller` directly.
 
+### Callers who hold very many principals
+
+A large directory routinely puts one person in hundreds or thousands of groups.
+`scripts/bench_principal_scale.py` measures what that does to the filter, holding
+visibility CONSTANT (the principal list is padded with names that match nothing)
+so the cost of *carrying* a long list is separated from the cost of being
+entitled to more rows. 100,000 trades, worst-case ordering, Neo4j 2025.10.1:
+
+| principals | ACL `any(p IN acl WHERE p IN $principals)` | property cut `c.coverageTeam IN $principals` |
+| --- | --- | --- |
+| 2 | 65.2 ms | 3.0 ms |
+| 32 | 140.5 ms | 3.3 ms |
+| 64 | 214.1 ms | 3.5 ms |
+| **100** | **304.6 ms** | 3.2 ms |
+| **128** | **64.9 ms** | 3.3 ms |
+| 256 | 65.7 ms | 3.0 ms |
+| 1,000 | 67.0 ms | 5.7 ms |
+| 5,000 | 71.0 ms | 19.4 ms |
+
+**There is a threshold at 128, and the worst case is below it.** Up to 127 the
+runtime scans the list linearly, so cost grows with its length; at 128 it
+switches to a hashed membership test and the per-row cost becomes constant. The
+ACL model is therefore **4.7x slower for a caller in 100 groups than for one in
+5,000** — which inverts the intuition, and matters because a hundred-ish groups
+is the common real case, not thousands.
+
+What remains above the threshold is a fixed per-query cost of shipping and
+hashing the list: roughly 16 ms at 5,000 principals. It is invisible against the
+ACL model's 65 ms baseline and very visible against the property cut's 3 ms.
+That cost is per query, not per row, so it does not grow with the dataset.
+
+Consequences:
+
+- **A caller in thousands of groups is not a problem.** Budget a fixed ~16 ms.
+- **A caller in around 100 groups is the case to test.** Below the threshold,
+  ordering matters too: `IN` short-circuits on a match, so a list with the
+  caller's most-used groups first is markedly faster than the worst case above.
+- **Anchoring removes the question**, because it collapses rows examined from
+  100,000 to the caller's own set; the per-row multiplier then applies to almost
+  nothing.
+- Passing principals as a **map** for O(1) lookup was measured and is not worth
+  it: ~20 ms flat at small sizes, worse than the list everywhere below 1,000.
+
+Separately, and outside the database: an identity provider may not put that many
+groups in a token at all. Entra ID omits the claim past roughly 150-200 groups
+and substitutes an overage pointer, so a design that reads memberships from token
+claims must handle that case explicitly rather than assuming the claim is
+complete.
+
 ## 6. Scope
 
 Revised by the spike results — anchoring moves first, because it is where the
