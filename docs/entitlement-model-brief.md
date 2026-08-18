@@ -141,12 +141,35 @@ impersonation itself is free (within noise on a 100k-node dataset) — but it ha
 to be designed in deliberately, and it means the service account must hold
 `IMPERSONATE` over every principal it may act for.
 
-**Property rules are not free.** The manual warns of significant overhead;
-measured on 100,000 nodes with *identical* visible results, a property-scoped
-role cost **5.5× a label-scoped one** (+130 ms). So "push it down to the
-database" is a correctness and blast-radius argument, not automatically a
-performance one. Design layer 2 around labels where possible and reserve property
-rules for what genuinely needs them.
+**PBAC and ABAC cost completely different things, and only one of them hurts.**
+They are often mentioned together, but the mechanisms differ: a property rule is
+evaluated **per row** as the query runs, whereas an auth rule is evaluated once
+when the **transaction begins**, to decide which roles the user holds. Measured
+with identical visible results
+([`scripts/bench_native_controls.py`](../scripts/bench_native_controls.py)):
+
+| nodes scanned | label-scoped RBAC | property-scoped PBAC | attribute-assigned ABAC |
+| --- | --- | --- | --- |
+| 10,000 | 3.2 ms | 6.6 ms (**2.1×**) | 3.2 ms (1.0×) |
+| 100,000 | 13.1 ms | 42.0 ms (**3.2×**) | 12.5 ms (0.95×) |
+| 400,000 | 39.8 ms | 164.8 ms (**4.1×**) | 38.8 ms (0.98×) |
+
+**PBAC is a multiplier that gets worse with scale** — 2× at ten thousand nodes,
+4× at four hundred thousand — because the predicate is evaluated for every row
+read. Note it is applied during the scan, *before* the query's own `WHERE` can
+reject a row, so a selective query does not avoid it.
+
+**ABAC is free.** On a query touching no data at all, where only fixed
+per-transaction cost remains, an attribute-assigned role and a statically granted
+one are indistinguishable (1.9 ms vs 2.1 ms), and a deliberately heavier rule
+condition changes nothing. Its cost does not scale with the data.
+
+The practical advice follows directly: **lean on ABAC, be selective with PBAC.**
+Attribute-driven role assignment solves the identity-mapping problem at no
+measured cost. Property rules should be reserved for cases that genuinely need
+them, with layer 2 designed around labels wherever possible. Pushing rules down
+to the database remains a correctness and blast-radius argument rather than a
+performance one.
 
 Also worth knowing: native `DENY` rules **fail open** when their criteria cannot
 be evaluated — a missing property means the restriction does not apply — which is
