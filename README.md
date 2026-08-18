@@ -144,7 +144,9 @@ fails when a business record is missing its access-control list — otherwise su
 record silently flows to everyone. The validator also persona-diffs mediated tools
 to prove the filter actually discriminates between callers.
 
-Full reference and known limits: [`docs/mediation-spec.md`](docs/mediation-spec.md).
+New to this? [`docs/entitlement-model-brief.md`](docs/entitlement-model-brief.md)
+explains the model conceptually in about three minutes. Full reference and known
+limits: [`docs/mediation-spec.md`](docs/mediation-spec.md).
 
 > **Note:** `get-schema` stays exposed even under `mediated`, because
 > text-to-Cypher needs it. It reveals structure (labels, relationship types,
