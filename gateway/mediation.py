@@ -29,7 +29,7 @@ from collections.abc import Mapping
 
 from fastmcp.exceptions import ToolError
 
-from .bundles import SecurityPolicy
+from .bundles import SOURCE_COMPOSITE, SOURCE_GRAPH, SOURCE_REMOTE, SecurityPolicy
 
 # Reserved query parameters. Callers may not supply these.
 P_PRINCIPAL = "__secure_auth_principal"
@@ -41,9 +41,13 @@ P_INLINE_GROUPS = "__secure_inline_group_prop"
 P_EVERYONE = "__secure_everyone"
 P_DISPLAY_KEYS = "__secure_display_keys"
 P_RESOURCE_ID = "__secure_resource_id"
+# Carries the pre-resolved authz map when identity is resolved out of band
+# (security.identity.source: remote).
+P_AUTHZ = "__secure_authz"
 RESERVED_PARAMS = (
     P_PRINCIPAL, P_PERM_PROP, P_ID_LABELS, P_MATCH_KEYS,
     P_GROUP_KEYS, P_INLINE_GROUPS, P_EVERYONE, P_DISPLAY_KEYS, P_RESOURCE_ID,
+    P_AUTHZ,
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -86,6 +90,60 @@ _PRELUDE = """CALL {
   } AS authz, u AS caller
 }"""
 
+# SEPARATED IDENTITY
+# ------------------
+# Two preludes for the case where identity does NOT live beside the data. Neither
+# binds `caller`: a composite database refuses to import entity values across a
+# USE boundary (22N16), and a remote source has no caller node in this database at
+# all. Manifest validation therefore forbids path grants and anchors for these
+# sources — see SEPARATION_TRADEOFFS in gateway/identity_sources.py.
+#
+# What IS preserved is the part that matters: `authz` has the identical shape, so
+# the entitlement filter, the final RETURN and the whole conformance harness are
+# unchanged from the co-located case.
+
+# composite — still ONE statement and one transaction, joined by USE. Values may
+# cross a constituent boundary even though entities may not, and `authz` is a map
+# of scalars and lists.
+_PRELUDE_COMPOSITE = """CALL {
+  USE @@IDENTITY_GRAPH@@
+  MATCH (u:@@ID_LABEL_EXPR@@)
+  WHERE u.schemaId IS NULL
+    AND any(key IN $@@P_MATCH_KEYS@@
+            WHERE u[key] IS NOT NULL
+              AND toLower(toString(u[key])) = toLower($@@P_PRINCIPAL@@))
+  OPTIONAL MATCH (u)-[:@@GROUP_RELS@@*1..]->(g)
+  WHERE g.schemaId IS NULL
+  WITH u, collect(DISTINCT head([k IN $@@P_GROUP_KEYS@@ WHERE g[k] IS NOT NULL | g[k]])) AS groupPrincipals
+  RETURN {
+    principalId: head([k IN $@@P_MATCH_KEYS@@ WHERE u[k] IS NOT NULL | u[k]]),
+    tenantId: u.tenantId,
+    authzPrincipals: [p IN groupPrincipals
+        + coalesce(u[$@@P_INLINE_GROUPS@@], [])
+        + [ head([k IN $@@P_MATCH_KEYS@@ WHERE u[k] IS NOT NULL | u[k]]), $@@P_EVERYONE@@ ]
+      WHERE p IS NOT NULL]
+  } AS authz
+}"""
+
+# remote — the principals were resolved on another connection before this query
+# was sent, so the prelude is a parameter binding. The engine builds that map; it
+# is never accepted from a tool caller, because P_AUTHZ is a reserved parameter.
+_PRELUDE_REMOTE = """WITH $@@P_AUTHZ@@ AS authz"""
+
+
+def prelude_for(policy: SecurityPolicy) -> str:
+    if policy.identity.source == SOURCE_COMPOSITE:
+        return _PRELUDE_COMPOSITE
+    if policy.identity.source == SOURCE_REMOTE:
+        return _PRELUDE_REMOTE
+    return _PRELUDE
+
+
+def binds_caller(policy: SecurityPolicy) -> bool:
+    """Whether the caller node is reachable from the data query."""
+    return policy.identity.source == SOURCE_GRAPH
+
+
 # The entitlement test for ONE variable. Built per variable rather than as a list
 # comprehension because path grants dispatch on the variable's labels.
 #
@@ -96,13 +154,31 @@ _TENANT = ("(authz.tenantId IS NULL OR {v}.tenantId IS NULL "
            "OR {v}.tenantId = authz.tenantId)")
 
 
-def _property_test(var: str, strict: bool) -> str:
+# COMPOSITE_PROPERTY_ACCESS
+# -------------------------
+# The ACL is read with a CONSTANT property key (`n.`Permissions.Read``) rather
+# than a parameterised one (`n[$param]`), because a non-constant key silently
+# returns NULL for any entity exported across a composite `USE` boundary —
+# verified on 2025.10.1; see neo4j-issue-composite-dynamic-property/.
+#
+# That defect is not merely a wrong answer here, it is a LEAK: a strict variable
+# would see NULL and deny (fail closed), but a derived variable treats "no ACL"
+# as reference data and would let every row through (fail OPEN).
+#
+# The property name is bundle config validated at manifest load, so interpolating
+# it is the same trust level as the identity labels and group relationship types.
+def _perm(policy: SecurityPolicy, var: str) -> str:
+    return f"{var}.`{policy.permissions_property}`"
+
+
+def _property_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
     tenant = _TENANT.format(v=var)
-    matches = (f"any(principal IN coalesce({var}[${P_PERM_PROP}], []) "
+    acl = _perm(policy, var)
+    matches = (f"any(principal IN coalesce({acl}, []) "
                f"WHERE principal IN authz.authzPrincipals)")
     if strict:
         return f"({var} IS NULL OR ({tenant} AND {matches}))"
-    return (f"({var} IS NULL OR {var}[${P_PERM_PROP}] IS NULL "
+    return (f"({var} IS NULL OR {acl} IS NULL "
             f"OR ({tenant} AND {matches}))")
 
 
@@ -144,17 +220,18 @@ def _path_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
 def _variable_test(policy: SecurityPolicy, var: str, strict: bool) -> str:
     model = policy.grant_model
     if model == "property":
-        return _property_test(var, strict)
+        return _property_test(policy, var, strict)
     if model == "path":
         return _path_test(policy, var, strict)
     # both: either route suffices.
-    return f"({_property_test(var, strict)} OR {_path_test(policy, var, strict)})"
+    return f"({_property_test(policy, var, strict)} OR {_path_test(policy, var, strict)})"
 
 
 def build_filter(policy: SecurityPolicy, scope: list[str], protect: list[str]) -> str:
     """The WHERE clause applied to every variable the query produces."""
     clauses = [_variable_test(policy, v, strict=(v in protect)) for v in scope]
-    return ("WITH " + ", ".join(["authz", "caller"] + scope)
+    carried = ["authz", "caller"] if binds_caller(policy) else ["authz"]
+    return ("WITH " + ", ".join(carried + scope)
             + "\nWHERE " + "\n  AND ".join(clauses))
 
 
@@ -259,6 +336,12 @@ def _subst(template: str, policy: SecurityPolicy) -> str:
         .replace("@@P_INLINE_GROUPS@@", P_INLINE_GROUPS)
         .replace("@@P_EVERYONE@@", P_EVERYONE)
         .replace("@@P_PERM_PROP@@", P_PERM_PROP)
+        .replace("@@PERM_PROP@@", policy.permissions_property)
+        .replace("@@P_AUTHZ@@", P_AUTHZ)
+        # Graph references are validated as identifiers at manifest load
+        # (bundles._GRAPH_REF) because a USE clause cannot be parameterised.
+        .replace("@@IDENTITY_GRAPH@@", policy.identity.identity_graph)
+        .replace("@@DATA_GRAPH@@", policy.identity.data_graph)
         .replace("@@GROUP_RELS@@", "|".join(policy.identity.group_rels))
         # A label expression rather than an unlabelled MATCH: the latter forces an
         # AllNodesScan that grows with the whole graph (measured: 405,430 db hits
@@ -408,6 +491,24 @@ def compose(
     """
     protect = [v for v in (protect or []) if v in scope]
 
+    if not binds_caller(policy):
+        # Separated identity: no caller node reaches the data query, so there is
+        # nothing to anchor from and no path grant to evaluate. Manifest
+        # validation rejects grants and this rejects anchors, so the two error
+        # paths together mean a separated bundle cannot silently lose a route.
+        if anchor:
+            raise ToolError(
+                f"anchoring requires the caller node, which security.identity.source="
+                f"{policy.identity.source!r} does not provide. Remove the anchor or use "
+                "security.identity.source=graph.")
+        use = ""
+        if policy.identity.source == SOURCE_COMPOSITE:
+            use = f"USE {policy.identity.data_graph}\n  "
+        body = ("CALL {\n  " + use + match_clause.strip()
+                + "\n  RETURN " + ", ".join(scope) + "\n}")
+        filt = build_filter(policy, scope, protect)
+        return _subst("\n".join([prelude_for(policy), body, filt, final_return]), policy)
+
     if anchor:
         anchor_var, anchor_pattern = anchor
         # DISTINCT matters: several paths may reach the same anchor node (a client
@@ -435,7 +536,16 @@ def compose(
 
 
 def resolve_identity_query(policy: SecurityPolicy) -> str:
-    return _subst(RESOLVE_IDENTITY_QUERY, policy)
+    """The standalone identity lookup.
+
+    Under ``composite`` this runs on the same connection as the data query, so it
+    must name the identity constituent. Under ``remote`` it runs on a different
+    connection entirely and needs no USE clause — the source picks the database.
+    """
+    query = RESOLVE_IDENTITY_QUERY
+    if policy.identity.source == SOURCE_COMPOSITE:
+        query = "USE @@IDENTITY_GRAPH@@\n" + query
+    return _subst(query, policy)
 
 
 def prelude_only_query(policy: SecurityPolicy) -> str:
@@ -445,7 +555,7 @@ def prelude_only_query(policy: SecurityPolicy) -> str:
     their principals. Used by scripts/bench_mediation.py to separate that
     constant overhead from the filter, which scales with rows examined.
     """
-    return _subst(_PRELUDE, policy) + "\nRETURN authz.authzPrincipals AS principals"
+    return _subst(prelude_for(policy), policy) + "\nRETURN authz.authzPrincipals AS principals"
 
 
 # --------------------------------------------------------------------------- #
@@ -471,6 +581,23 @@ def explain_query(policy: SecurityPolicy, label: str, key_property: str) -> str:
     # Each UNION arm is independent and must import the variables it uses.
     # OPTIONAL MATCH keeps one row per grant whether or not it matched, so a
     # resource with no matching grant still yields a row to report on.
+    # A separated identity source has no caller node, so there are no path grants
+    # to report and the resource lookup must be scoped to the data graph. The ACL
+    # explanation still works, which is the only route those bundles can use.
+    if not binds_caller(policy):
+        use = (f"USE {policy.identity.data_graph}\n  "
+               if policy.identity.source == SOURCE_COMPOSITE else "")
+        return _subst(f"""{prelude_for(policy)}
+CALL {{
+  {use}MATCH (resource:{label} {{{key_property}: ${P_RESOURCE_ID}}})
+  RETURN resource
+}}
+RETURN
+  [] AS matched,
+  [x IN coalesce(resource.`@@PERM_PROP@@`, [])
+     WHERE x IN authz.authzPrincipals] AS aclMatches,
+  authz.authzPrincipals AS principals""", policy)
+
     arms = [
         f"  WITH caller, resource\n"
         f"  OPTIONAL MATCH grantPath = {_bind(grant.via, 'resource')}\n"
@@ -499,7 +626,7 @@ WITH caller, authz, resource
 {collect}
 RETURN
   {matched} AS matched,
-  [x IN coalesce(resource[$@@P_PERM_PROP@@], [])
+  [x IN coalesce(resource.`@@PERM_PROP@@`, [])
      WHERE x IN authz.authzPrincipals] AS aclMatches,
   authz.authzPrincipals AS principals""".replace(
         "@@P_DISPLAY_KEYS@@", P_DISPLAY_KEYS), policy)

@@ -1,9 +1,10 @@
 # Tutorial: testing entitlements on Aura
 
 Run the entitlement model against Aura and see the identity graph for yourself.
-Uses the `client_platform` bundle: an institutional client platform where clients
+Uses the `client_platform` bundle — an institutional client platform where clients
 consume research, analytics, execution and data products, and the commercial
-question is which product to offer next.
+question is which product to offer next — plus `client_platform_split`, the same
+platform with the identity graph in a different database.
 
 The dataset ships as **two separate Cypher files** — that separation is the point
 of this tutorial:
@@ -30,16 +31,22 @@ relationship. That is what makes the separated topologies below possible, so loa
 
 ## Which topology to try
 
-| | Arrangement | Aura instances | Works today |
-| --- | --- | --- | --- |
-| **A** | one graph, identity and business data intermingled | 1 | ✅ |
-| **B** | one graph, distinct subgraphs joined at defined seams | 1 | ✅ |
-| **C** | two business domains, **each with its own copy of identity** | 2 | ✅ |
-| **D** | identity in **one** database, the data it protects in **another** | 2 | ❌ |
+| | Arrangement | Instances | Works today | Path grants |
+| --- | --- | --- | --- | --- |
+| **A** | one graph, identity and business data intermingled | 1 | ✅ | ✅ |
+| **B** | one graph, distinct subgraphs joined at defined seams | 1 | ✅ | ✅ |
+| **C** | two business domains, **each with its own copy of identity** | 2 | ✅ | ✅ |
+| **D** | identity in one database, the data in another, **naively** | 2 | ❌ | — |
+| **E** | same split, joined by a **composite database** | 1–2 | ✅ | ❌ |
+| **F** | same split, identity resolved over a **second connection** | 2 | ✅ | ❌ |
 
 A and B are the same physically and differ in modelling discipline; B is what you
-would actually govern. C is the multi-bundle setup. D is the one to understand
-before promising it to anyone.
+would actually govern. C is the multi-bundle setup.
+
+**D, E and F are the same physical arrangement with three different answers.**
+D is what happens if you split identity from data and change nothing else — it
+fails. E and F are the two supported ways to make that split work, and both cost
+you the same thing: path grants and anchoring. Read D first; it explains why.
 
 ### C and D are not "one instance vs two" — read this before skipping
 
@@ -75,8 +82,9 @@ to resolve against.
 
 The distinction is worth being precise about in an architecture conversation,
 because "put identity in its own database" sounds like good hygiene and is the
-one arrangement that does not work. The fix is not architectural purity; it is
-**replication** (C) or one of the two options in the D section below.
+one arrangement that does not work on its own. The fix is **replication** (C), or
+declaring a separated identity source so the engine composes the query
+differently (**E** and **F**) — at the cost of path grants and anchoring.
 
 ---
 
@@ -273,28 +281,14 @@ Reload `identity.cypher` to restore it.
 
 ---
 
-## Topology D — identity in a different database from the data
+## Topology D — identity in a different database, and nothing else changed
 
-**This does not work today, and it is worth understanding why.**
+**This does not work, and it is worth understanding why before reaching for E or F.**
 
 Mediation composes a *single* Cypher statement: resolve the caller, run the
 query, filter the results. A single statement cannot traverse two databases, so
 if the identity graph lives in instance 1 and the business data in instance 2,
 the authorization prelude has nothing to resolve against.
-
-You have three options:
-
-1. **Replicate identity into each business database** — topology C. Simple,
-   works now, and the identity file is designed for it.
-2. **Resolve identity out of band**, then pass the resulting principals as a
-   parameter to the business query. This needs a pluggable identity source in the
-   engine (`resolve-identity` fetching from an external service or a second
-   connection instead of traversing the local graph). Designed but not built —
-   it is also the natural integration point for an external policy service that
-   already knows a user's entitlements.
-3. **Push the check into the database** with native controls, so the business
-   instance enforces per-user rules without needing the identity graph locally.
-   See §6 of [`entitlement-model-brief.md`](entitlement-model-brief.md).
 
 If you try topology D as it stands, `identity.cypher` will load its people and
 groups into the identity instance and silently create **no seams** — there are no
@@ -302,6 +296,184 @@ groups into the identity instance and silently create **no seams** — there are
 no business data, and `check_entitlements.py` reports `must_see` failures rather
 than anything dangerous. It fails closed, which is the right direction, but it
 fails.
+
+You have four options:
+
+1. **Replicate identity into each business database** — topology C. Simple,
+   works now, keeps everything including path grants.
+2. **Join the two databases with a composite database** — topology E below.
+3. **Resolve identity over a second connection** — topology F below.
+4. **Push the check into the database** with native controls, so the business
+   instance enforces per-user rules without needing the identity graph locally.
+   See §6 of [`entitlement-model-brief.md`](entitlement-model-brief.md).
+
+### What options 2 and 3 cost you
+
+Both are supported by the engine, and both give up the same three things. This is
+not an implementation gap — it follows from one fact:
+
+> The caller node is in the identity database. **It cannot reach the data query.**
+
+A composite database says so explicitly if you try
+(`22N16: Importing entity values to a graph with a USE clause is not supported`),
+and a second connection has no caller node in the data database at all.
+Therefore:
+
+| | Kept | Lost |
+| --- | --- | --- |
+| Per-caller row filtering | ✅ | |
+| Aggregates computed after filtering | ✅ | |
+| Curated-only posture, conformance harness, `explain-access` | ✅ | |
+| **Path grants** (`grant_model: path` / `both`) | | ❌ entitlements must be materialised as ACLs |
+| **Anchoring** | | ❌ the 20× performance lever is gone; scan-and-filter only |
+| Tools that scope to the caller ("the clients I cover") | | ❌ must be expressed with a parameter |
+
+The engine **refuses to start** rather than degrading quietly: a bundle declaring
+a separated source with path grants, an anchor, or a tool referencing `caller`
+fails at load with a message saying why.
+
+That trade is the whole argument in one line: **separating identity from data
+costs you exactly the capabilities that come from identity being a graph next to
+the data.** What you get back is independent lifecycle, independent credentials,
+and an identity store that many domains can share.
+
+---
+
+## Topologies E and F — the split, made to work
+
+Both use the **`client_platform_split`** bundle: the same client platform as
+above, with `grant_model: property` and the identity graph elsewhere. It ships
+configured for E; switching to F is two lines in `bundle.yaml`.
+
+Load the two halves into two databases. On self-managed Enterprise (or AuraDB
+Business Critical / Virtual Dedicated Cloud, which support several databases per
+instance):
+
+```cypher
+CREATE DATABASE datadb WAIT;
+CREATE DATABASE identitydb WAIT;
+```
+
+```bash
+cypher-shell -d datadb     -f bundles/client_platform/data/platform.cypher
+cypher-shell -d identitydb -f bundles/client_platform/data/identity.cypher
+```
+
+`identity.cypher` finds no `Client` nodes in `identitydb` and creates no seams.
+That is expected here and is exactly the situation topology D failed on.
+
+### E — composite database
+
+```cypher
+CREATE COMPOSITE DATABASE fed;
+CREATE ALIAS fed.data     FOR DATABASE datadb;
+CREATE ALIAS fed.identity FOR DATABASE identitydb;
+```
+
+`bundle.yaml` already declares the constituents:
+
+```yaml
+identity:
+  source: composite
+  identity_graph: fed.identity
+  data_graph: fed.data
+```
+
+Point `.env` at the **composite** database and run:
+
+```bash
+NEO4J_DATABASE=fed ACTIVE_BUNDLE=client_platform_split \
+  uv run python scripts/check_entitlements.py
+```
+
+Expect **11 passed, 0 failed**. The engine composes one statement: the prelude
+resolves the caller under `USE fed.identity`, the tool's match runs under
+`USE fed.data`, and the filter and final RETURN run in the composite query over
+what came back. **One statement, one transaction, two databases** — so unlike F
+there is no consistency window between resolving and reading.
+
+### F — a second connection
+
+Comment out the three composite lines in `bundle.yaml` and uncomment:
+
+```yaml
+identity:
+  source: remote
+  remote_env_prefix: IDENTITY
+```
+
+The identity connection comes from the environment, never from the manifest —
+same rule as every other connection here:
+
+```bash
+# .env
+NEO4J_URI=neo4j+s://<data-instance>.databases.neo4j.io
+NEO4J_DATABASE=neo4j
+IDENTITY_NEO4J_URI=neo4j+s://<identity-instance>.databases.neo4j.io
+IDENTITY_NEO4J_USERNAME=neo4j
+IDENTITY_NEO4J_PASSWORD=<identity password>
+IDENTITY_NEO4J_DATABASE=neo4j
+```
+
+```bash
+ACTIVE_BUNDLE=client_platform_split uv run python scripts/check_entitlements.py
+```
+
+Expect **11 passed, 0 failed** again — identical assertions, identical results,
+different architecture. This is the mode that makes the identity store genuinely
+independent: a different instance, a different region, its own credentials, its
+own lifecycle. It is also the extension point for an **external** entitlement
+service: implement `IdentitySource` in
+[`gateway/identity_sources.py`](../gateway/identity_sources.py), register it, and
+the rest of the engine is unchanged.
+
+### The case that proves what you gave up
+
+Two of the eleven cases are there specifically to record the loss:
+
+```
+PASS  authorship access is LOST when identity is separated
+PASS  the covering team still sees both, because that route is an ACL entry
+```
+
+In the co-located bundle, `nadia.haddad` reads `INT-2006` because she **logged**
+it — a path from the caller that no ACL entry expresses. Split identity out and
+that route cannot be walked, so she loses the record while her colleague on the
+covering team keeps it. The suite asserts the loss deliberately, so it is a
+tested fact rather than a surprise in front of an audience.
+
+Ask `explain-access` the same question under each bundle — change only
+`ACTIVE_BUNDLE` and the connection:
+
+```bash
+uv run python - <<'EOF'
+import asyncio, os, warnings; warnings.simplefilter("ignore")
+from gateway.config import Config
+from gateway.yaml_tools import Neo4jExecutor
+from gateway.security_tools import build_explain_access
+c = Config.from_env(active_bundle=os.environ["ACTIVE_BUNDLE"]); ex = Neo4jExecutor(c)
+fn = build_explain_access(c, ex).fn
+async def main():
+    for who in ["nadia.haddad@bank.com", "sofia.rossi@bank.com"]:
+        r = await fn(resource="INT-2006", principal=who)
+        print(f"  {who:24} granted={r['granted']:<6} "
+              f"{[g['reason'] for g in r.get('grantedBy', [])]}")
+asyncio.run(main())
+EOF
+```
+
+```
+client_platform         nadia    granted=True   ['logged this interaction']
+                        sofia    granted=True   ['covers the client ...']
+
+client_platform_split   nadia    granted=False  []
+                        sofia    granted=True   []
+```
+
+Nadia's route was a relationship. Split identity out and it is gone; Sofia's,
+which was a group name in a list, survives. **That single line is the clearest
+statement of what separation costs**, and it is why the co-located topologies are
+the recommendation whenever the identity graph can live beside the data.
 
 ---
 
@@ -407,6 +579,7 @@ when someone leaves the desk.
 | Why can they see it? | `explain-access` snippet in topology A |
 | Do derived grants match the lists? | the `differential: true` case in `entitlement_tests.yaml` |
 | What does mediation cost? | `uv run python scripts/bench_mediation.py client_platform` |
+| What does separating identity cost? | run the same suite under `client_platform` and `client_platform_split` |
 | What do native controls cost? | `uv run python scripts/bench_native_controls.py` (Enterprise/Business Critical) |
 
 ## The cast

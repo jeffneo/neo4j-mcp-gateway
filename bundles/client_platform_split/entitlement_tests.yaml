@@ -1,0 +1,107 @@
+# Entitlement conformance for the SPLIT client platform — identity in one
+# database, business data in another.
+#
+#   ACTIVE_BUNDLE=client_platform_split uv run python scripts/check_entitlements.py
+#
+# The first three sections assert that separation costs nothing that the ACL
+# model already expressed. The last section asserts what it DOES cost, so the
+# loss is a tested fact rather than something discovered in front of a customer.
+
+cases:
+  # --- Coverage-derived access, via materialised ACLs -------------------------
+  - name: coverage sees interactions for its own clients
+    principal: lena.fischer@bank.com
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Northwind Asset Management'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+    must_see: [INT-2001, INT-2002]
+
+  - name: coverage cannot see another team's client interactions
+    principal: evan.brooks@bank.com
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Northwind Asset Management'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+    must_not_see: [INT-2001, INT-2002]
+    expect_count: 0
+
+  - name: coverage colleagues on one team see the same interactions
+    same_for: [lena.fischer@bank.com, marc.dubois@bank.com]
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Northwind Asset Management'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+
+  # --- Role-derived access ----------------------------------------------------
+  - name: a product specialist sees their own family across all coverage teams
+    principal: nadia.haddad@bank.com
+    tool: client_opportunities
+    id_field: product
+    must_see: [Portfolio Analytics Credit, Portfolio Analytics Equities, Market Dashboards]
+    must_not_see: [Electronic Execution]
+
+  - name: an execution specialist does not see analytics opportunities
+    principal: tomas.silva@bank.com
+    tool: client_opportunities
+    id_field: product
+    must_see: [Electronic Execution]
+    must_not_see: [Portfolio Analytics Credit, Market Dashboards]
+
+  - name: supervision sees the whole pipeline
+    principal: peter.lindqvist@bank.com
+    tool: client_opportunities
+    id_field: product
+    expect_count: 4
+
+  # --- Aggregates are still computed after filtering --------------------------
+  # The property that matters most survives separation unchanged: the filter runs
+  # in the data database, and the final RETURN runs after it.
+  - name: pipeline value reflects only what the caller may see
+    principal: evan.brooks@bank.com
+    match: "MATCH (o:Opportunity)-[:FOR_CLIENT]->(c:Client)"
+    scope: [o, c]
+    protect: [o]
+    return: "RETURN sum(o.value) AS id"
+    id_field: id
+    must_see: [120000.0]
+
+  - name: supervision sees the full pipeline value
+    principal: peter.lindqvist@bank.com
+    match: "MATCH (o:Opportunity)-[:FOR_CLIENT]->(c:Client)"
+    scope: [o, c]
+    protect: [o]
+    return: "RETURN sum(o.value) AS id"
+    id_field: id
+    must_see: [900000.0]
+
+  # --- Reference data must still flow ----------------------------------------
+  - name: the product catalogue is reference data and visible to everyone
+    same_for: [evan.brooks@bank.com, nadia.haddad@bank.com, peter.lindqvist@bank.com]
+    match: "MATCH (x:Product)"
+    scope: [x]
+    return: "RETURN x.code AS id"
+    id_field: id
+
+  # --- WHAT SEPARATION COSTS --------------------------------------------------
+  # In the co-located bundle nadia reads INT-2006 because she logged it — a path
+  # from the caller, which no ACL entry expresses. With identity in another
+  # database that path cannot be walked, so the same person loses the same
+  # record. This case asserts the loss deliberately: it is the price of
+  # separation, and it should fail loudly if anyone believes otherwise.
+  - name: authorship access is LOST when identity is separated
+    principal: nadia.haddad@bank.com
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Kestrel Capital'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+    must_not_see: [INT-2006, INT-2003]
+    expect_count: 0
+
+  - name: the covering team still sees both, because that route is an ACL entry
+    principal: sofia.rossi@bank.com
+    match: "MATCH (x:Interaction)-[:WITH_CLIENT]->(:Client {name: 'Kestrel Capital'})"
+    scope: [x]
+    return: "RETURN x.interactionId AS id"
+    id_field: id
+    must_see: [INT-2003, INT-2006]

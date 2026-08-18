@@ -130,7 +130,7 @@ def main(argv: list[str]) -> int:
 
     executor = Neo4jExecutor(config)
     try:
-        query, extra = resolve_tool_query(config, spec, principal)
+        query, extra = resolve_tool_query(config, spec, principal, executor=executor)
         params.update(extra)
         rows = executor.run(query, params, spec.read_only)
     except Exception as exc:  # Neo4j / Cypher errors — show them plainly

@@ -16,7 +16,7 @@ from fastmcp.tools.function_tool import FunctionTool
 
 from . import mediation
 from .config import Config
-from .yaml_tools import Neo4jExecutor
+from .yaml_tools import Neo4jExecutor, mediation_params
 
 
 def _unique(values) -> list[str]:
@@ -49,34 +49,24 @@ def build_resolve_identity(config: Config, executor: Neo4jExecutor, prefix: str 
     query = mediation.resolve_identity_query(policy)
 
     async def handler(**kwargs) -> dict:
+        from .identity_sources import get_identity_source
         principal, source = mediation.resolve_principal(
             policy, kwargs.get("principal"), config.env_snapshot)
-        params = mediation.security_params(policy, principal)
-        rows = executor.run(query, params, read_only=True)
-
-        authz = [principal, policy.principal.everyone]
-        result: dict = {
+        # Whichever identity source the bundle declares — co-located, composite
+        # constituent, or a separate connection — answers the same question and
+        # returns the same shape, so this tool is unchanged by the topology.
+        resolution = get_identity_source(config, executor).resolve(principal)
+        return {
             "principal": principal,
             "source": source,
-            "identityFound": bool(rows),
-            "groups": [],
-            "notes": [],
+            "identitySource": policy.identity.source,
+            "identityFound": resolution.found,
+            "principalLabels": resolution.principal_labels,
+            "principalProperties": resolution.principal_properties,
+            "groups": resolution.groups,
+            "authzPrincipals": resolution.authz_principals,
+            "notes": resolution.notes,
         }
-        if rows:
-            row = rows[0]
-            result["principalLabels"] = row.get("principalLabels")
-            result["principalProperties"] = row.get("principalProperties")
-            groups = row.get("groups") or []
-            result["groups"] = groups
-            authz.extend(g.get("name") for g in groups if isinstance(g, dict) and g.get("name"))
-            authz.extend(row.get("inlineGroups") or [])
-        else:
-            result["notes"].append(
-                "No matching identity node was found; the caller holds only their own "
-                "identity and the everyone principal."
-            )
-        result["authzPrincipals"] = _unique(authz)
-        return result
 
     return FunctionTool(
         name=f"{prefix}resolve-identity",
@@ -121,7 +111,7 @@ def build_secure_read_cypher(config: Config, executor: Neo4jExecutor, prefix: st
         for reserved in mediation.RESERVED_PARAMS:
             if reserved in user_params:
                 raise ToolError(f"params cannot include reserved key {reserved!r}")
-        params = {**user_params, **mediation.security_params(policy, principal)}
+        params = {**user_params, **mediation_params(config, principal, executor)}
 
         composed = mediation.compose(policy, query, scope, final_return, protect)
         try:
@@ -196,7 +186,7 @@ def build_explain_access(config: Config, executor: Neo4jExecutor, prefix: str = 
 
         for label in labels:
             params = {
-                **mediation.security_params(policy, principal),
+                **mediation_params(config, principal, executor),
                 mediation.P_RESOURCE_ID: resource_id,
             }
             rows = executor.run(

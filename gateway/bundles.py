@@ -33,6 +33,21 @@ MODE_OPEN = "open"
 MODE_MEDIATED = "mediated"
 VALID_MODES = (MODE_OPEN, MODE_MEDIATED)
 
+# Where the caller's principals are resolved. Only SOURCE_GRAPH puts the caller
+# node in reach of the data query; the other two are "separated" (see
+# IdentityConfig and SEPARATION_TRADEOFFS in gateway/identity_sources.py).
+SOURCE_GRAPH = "graph"
+SOURCE_COMPOSITE = "composite"
+SOURCE_REMOTE = "remote"
+VALID_IDENTITY_SOURCES = (SOURCE_GRAPH, SOURCE_COMPOSITE, SOURCE_REMOTE)
+SEPARATED_SOURCES = (SOURCE_COMPOSITE, SOURCE_REMOTE)
+
+# A composite constituent is interpolated into the Cypher `USE` clause, so it is
+# validated strictly rather than quoted.
+_GRAPH_REF = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z][A-Za-z0-9_-]*)*$")
+# An ACL property key is interpolated into Cypher inside backticks.
+_PROPERTY_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
 
 @dataclass
 class Grant:
@@ -60,7 +75,32 @@ class IdentityConfig:
 
     Every field is a graph-shape detail, so a bundle whose identity model uses
     different labels/relationships/properties can be mediated without code.
+
+    ``source`` decides WHERE that resolution happens, which is the one setting
+    that changes the architecture rather than the graph shape:
+
+    * ``graph``     — the identity graph lives in the same database as the data.
+                      The prelude traverses it in the same statement, and the
+                      caller node is available to path grants and anchors.
+    * ``composite`` — identity and data are separate databases joined by a
+                      composite database. One statement still, via ``USE``.
+    * ``remote``    — identity is resolved out of band (a second Neo4j
+                      connection) and the resulting principals are passed into
+                      the data query as a parameter. Two round trips.
+
+    The two separated sources trade capability for independence: no caller node
+    reaches the data query, so path grants and anchoring are unavailable and
+    ``grant_model`` must be ``property``. See SEPARATION_TRADEOFFS in
+    gateway/identity_sources.py.
     """
+
+    source: str = "graph"
+    # source: composite — the constituent aliases, e.g. "fed.identity"/"fed.data".
+    identity_graph: str = ""
+    data_graph: str = ""
+    # source: remote — env prefix for the identity connection, so the credentials
+    # stay in a git-ignored .env like every other connection in this repo.
+    remote_env_prefix: str = "IDENTITY"
 
     labels: list[str] = field(default_factory=lambda: ["User", "Principal"])
     match_keys: list[str] = field(
@@ -180,6 +220,10 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
         raise ValueError(f"{f}: security.identity must be a mapping")
     defaults = IdentityConfig()
     identity = IdentityConfig(
+        source=str(id_raw.get("source") or defaults.source).strip().lower(),
+        identity_graph=str(id_raw.get("identity_graph") or "").strip(),
+        data_graph=str(id_raw.get("data_graph") or "").strip(),
+        remote_env_prefix=str(id_raw.get("remote_env_prefix") or defaults.remote_env_prefix).strip(),
         labels=[str(x) for x in (id_raw.get("labels") or defaults.labels)],
         match_keys=[str(x) for x in (id_raw.get("match_keys") or defaults.match_keys)],
         group_rels=[str(x) for x in (id_raw.get("group_rels") or defaults.group_rels)],
@@ -196,6 +240,29 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
     for label in identity.labels:
         if not label.replace("_", "").isalnum():
             raise ValueError(f"{f}: security.identity.labels contains invalid label {label!r}")
+
+    if identity.source not in VALID_IDENTITY_SOURCES:
+        raise ValueError(
+            f"{f}: security.identity.source must be one of {list(VALID_IDENTITY_SOURCES)}, "
+            f"got {identity.source!r}")
+    if identity.source == SOURCE_COMPOSITE:
+        for fieldname in ("identity_graph", "data_graph"):
+            value = getattr(identity, fieldname)
+            if not value:
+                raise ValueError(
+                    f"{f}: security.identity.source=composite requires "
+                    f"security.identity.{fieldname} (the constituent alias, e.g. 'fed.identity')")
+            if not _GRAPH_REF.match(value):
+                raise ValueError(
+                    f"{f}: security.identity.{fieldname}={value!r} is not a valid graph reference")
+        if identity.identity_graph == identity.data_graph:
+            raise ValueError(
+                f"{f}: security.identity.identity_graph and data_graph are the same constituent "
+                f"({identity.data_graph!r}); use source: graph instead")
+    if identity.source == SOURCE_REMOTE and not identity.remote_env_prefix.replace("_", "").isalnum():
+        raise ValueError(
+            f"{f}: security.identity.remote_env_prefix={identity.remote_env_prefix!r} is not a "
+            "valid environment-variable prefix")
 
     p_raw = sec_raw.get("principal") or {}
     if not isinstance(p_raw, dict):
@@ -238,6 +305,33 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
     if grant_model in (GRANT_PATH, GRANT_BOTH) and not grants:
         raise ValueError(f"{f}: security.grant_model={grant_model!r} requires at least one grant")
 
+    # A separated identity source puts the caller node out of reach of the data
+    # query — composite databases refuse to import entity values across a USE
+    # boundary, and a remote source has no caller node in this database at all.
+    # A path grant is a traversal FROM the caller, so it cannot be evaluated.
+    # Fail at load rather than silently degrading to "no grant matched", which
+    # under grant_model=path would deny everything and under `both` would quietly
+    # fall back to ACLs without saying so.
+    if identity.source in SEPARATED_SOURCES and grant_model != GRANT_PROPERTY:
+        raise ValueError(
+            f"{f}: security.identity.source={identity.source!r} separates identity from the data "
+            f"it protects, so the caller node cannot be reached from the data query. "
+            f"grant_model must be {GRANT_PROPERTY!r} (got {grant_model!r}). "
+            "Path grants and anchoring require security.identity.source=graph.")
+    if identity.source in SEPARATED_SOURCES and grants:
+        raise ValueError(
+            f"{f}: security.grants are path grants and cannot be evaluated when "
+            f"security.identity.source={identity.source!r}. Remove them or use source: graph.")
+
+    # Interpolated into Cypher as a backtick-quoted property key (see
+    # COMPOSITE_PROPERTY_ACCESS in gateway/mediation.py), so it must not be able
+    # to break out of the quoting.
+    permissions_property = str(sec_raw.get("permissions_property") or "Permissions.Read")
+    if not _PROPERTY_KEY.match(permissions_property):
+        raise ValueError(
+            f"{f}: security.permissions_property={permissions_property!r} must be letters, "
+            "digits, underscores and dots only")
+
     raw_keys = sec_raw.get("resource_keys") or {}
     if not isinstance(raw_keys, dict):
         raise ValueError(f"{f}: security.resource_keys must be a mapping of label -> property")
@@ -251,7 +345,7 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
         grant_model=grant_model,
         grants=grants,
         resource_keys=resource_keys,
-        permissions_property=str(sec_raw.get("permissions_property") or "Permissions.Read"),
+        permissions_property=permissions_property,
         protected_labels=[str(x) for x in protected_labels],
         identity=identity,
         principal=principal,

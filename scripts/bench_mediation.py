@@ -42,7 +42,7 @@ import neo4j
 
 from gateway import mediation
 from gateway.config import Config, active_bundle_names
-from gateway.yaml_tools import ToolSpec, load_tool_specs
+from gateway.yaml_tools import ToolSpec, load_tool_specs, mediation_params
 
 
 def _profile_db_hits(profile: dict | None) -> int:
@@ -109,7 +109,7 @@ def bench_tool(session, policy, spec: ToolSpec, principal: str, runs: int, warmu
         return
 
     queries = _variants(policy, spec)
-    sec = mediation.security_params(policy, principal)
+    sec = mediation_params(config, principal, executor)
     params = {**args, **sec}
 
     print(f"\n{spec.name}   (principal: {principal})")

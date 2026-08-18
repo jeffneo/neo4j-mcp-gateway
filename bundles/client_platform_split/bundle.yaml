@@ -1,0 +1,56 @@
+# The SAME client platform as the `client_platform` bundle, with the identity
+# graph living somewhere else. Select with: ACTIVE_BUNDLE=client_platform_split
+#
+# This bundle exists to make the separated topologies runnable and testable. It
+# is deliberately a separate bundle rather than a runtime flag on the original,
+# because where identity lives is an architectural declaration with different
+# capabilities — not something that should change based on a shell variable.
+name: neo4j-client-platform-split-gateway
+description: Institutional client platform with the identity graph in a separate database.
+
+instructions: >
+  This gateway analyses a DIGITAL CLIENT PLATFORM through which institutional
+  clients consume research, analytics, execution and data/API products, and the
+  commercial question is up/cross-sell. Entities: Client, Product, UsageSummary,
+  Interaction, Opportunity, ResearchNote. The identity graph (User, AdGroup,
+  Desk) lives in a SEPARATE database, so entitlements are decided by
+  access-control lists on each record rather than by traversal from the caller.
+  Access is entitlement-filtered: a caller sees the clients their team covers, a
+  product specialist sees their own product family, and supervision sees
+  everything. WORKFLOW: call resolve-identity first, then use the curated
+  usecase_ tools. Results are already filtered to the caller's entitlements, so
+  never describe a result as the complete firm-wide picture. Raw read-cypher is
+  unavailable because it would bypass the filter.
+
+security:
+  mode: mediated
+  permissions_property: "Permissions.Read"
+  protected_labels: [Interaction, Opportunity, UsageSummary]
+
+  # Property model is REQUIRED here, and the engine enforces it. A path grant is
+  # a traversal from the caller into the data; with identity in another database
+  # there is no caller node to traverse from. See SEPARATION_TRADEOFFS in
+  # gateway/identity_sources.py.
+  grant_model: property
+
+  resource_keys:
+    Interaction: interactionId
+    Opportunity: opportunityId
+    UsageSummary: usageId
+
+  identity:
+    # ---- Topology E: composite database (one statement, two databases) -------
+    source: composite
+    identity_graph: fed.identity
+    data_graph: fed.data
+    #
+    # ---- Topology F: remote connection (two round trips, two instances) ------
+    # Comment out the three lines above and uncomment this one. The connection
+    # then comes from IDENTITY_NEO4J_URI / _USERNAME / _PASSWORD / _DATABASE in a
+    # git-ignored .env — never from this file.
+    # source: remote
+    # remote_env_prefix: IDENTITY
+
+downstream:
+  read_only: true
+  # read-cypher is hidden automatically because mode is mediated.

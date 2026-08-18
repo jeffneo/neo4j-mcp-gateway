@@ -385,9 +385,26 @@ class Neo4jExecutor:
 # MCP registration
 # --------------------------------------------------------------------------- #
 
+def mediation_params(config: Config, principal: str, executor=None) -> dict[str, Any]:
+    """Reserved parameters for one mediated call, including separated identity.
+
+    Under ``security.identity.source: remote`` the caller's principals are
+    resolved on a different connection *before* the data query is sent, and
+    travel as the reserved ``__secure_authz`` parameter. Every other source
+    resolves inside the statement, so this is just the static parameter set.
+    """
+    from . import mediation
+    params = mediation.security_params(config.security, principal)
+    if config.security.identity.source == "remote":
+        from .identity_sources import get_identity_source
+        result = get_identity_source(config, executor).resolve(principal)
+        params[mediation.P_AUTHZ] = result.as_authz()
+    return params
+
+
 def resolve_tool_query(
     config: Config | None, spec: ToolSpec, principal: str | None = None,
-    use_anchor: bool = True,
+    use_anchor: bool = True, executor=None,
 ) -> tuple[str, dict[str, Any]]:
     """Return ``(query, extra_params)`` for a tool spec.
 
@@ -407,7 +424,7 @@ def resolve_tool_query(
         policy, spec.match_clause, spec.scope, spec.return_clause.strip(), spec.protect,
         anchor=spec.anchor if use_anchor else None,
     )
-    return query, mediation.security_params(policy, resolved)
+    return query, mediation_params(config, resolved, executor)
 
 
 def _make_handler(spec: ToolSpec, executor: Neo4jExecutor, config: Config | None = None):
@@ -422,7 +439,7 @@ def _make_handler(spec: ToolSpec, executor: Neo4jExecutor, config: Config | None
         params: dict[str, Any] = {p.name: p.default for p in spec.parameters if p.has_default}
         params.update({k: v for k, v in kwargs.items() if v is not None and k != "principal"})
 
-        query, extra = resolve_tool_query(config, spec, kwargs.get("principal"))
+        query, extra = resolve_tool_query(config, spec, kwargs.get("principal"), executor=executor)
         params.update(extra)
 
         try:
@@ -442,8 +459,24 @@ def _make_handler(spec: ToolSpec, executor: Neo4jExecutor, config: Config | None
     return handler
 
 
-def _check_mediated_spec(spec: ToolSpec) -> None:
+def _check_mediated_spec(spec: ToolSpec, policy=None) -> None:
     """A mediated bundle's tools must be filterable. Fail loudly at load, not later."""
+    if policy is not None and policy.identity.source != "graph":
+        # No caller node reaches the data query under a separated identity source.
+        # A tool that scopes itself to the calling user ("the clients I cover")
+        # would return zero rows instead of failing, which reads as an entitlement
+        # problem and is genuinely hard to diagnose. Refuse at load instead.
+        import re as _re
+        if _re.search(r"\bcaller\b", spec.match_clause):
+            raise ToolSpecError(
+                f"{spec.source_path.name}: this tool's match references 'caller', but "
+                f"security.identity.source={policy.identity.source!r} resolves identity "
+                "outside this database, so no caller node exists here. Express the scoping "
+                "with a parameter, or use security.identity.source=graph.")
+        if spec.anchor:
+            raise ToolSpecError(
+                f"{spec.source_path.name}: 'anchor' traverses from the caller, which "
+                f"security.identity.source={policy.identity.source!r} does not provide.")
     if not spec.is_mediated_form:
         raise ToolSpecError(
             f"{spec.source_path.name}: this bundle declares security.mode=mediated, so tools must "
@@ -514,7 +547,7 @@ def register_yaml_tools(
     registered: list[str] = []
     for spec in specs:
         if config.security.mediated:
-            _check_mediated_spec(spec)
+            _check_mediated_spec(spec, config.security)
         tool = build_yaml_tool(spec, executor, tool_prefix, config)
         mcp.add_tool(tool)
         registered.append(tool.name)

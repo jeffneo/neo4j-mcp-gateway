@@ -153,13 +153,45 @@ limits: [`docs/mediation-spec.md`](docs/mediation-spec.md).
 > property keys) but no row data. Add it to `downstream.hide` if your deployment
 > treats the schema itself as sensitive.
 
+### Where identity lives
+
+By default the identity graph sits beside the data and the prelude traverses it
+in the same statement. `security.identity.source` moves it:
+
+```yaml
+security:
+  identity:
+    source: graph        # default — identity beside the data, one statement
+    # source: composite  # identity and data in separate databases, joined by a
+    #   identity_graph: fed.identity        #   composite database. Still ONE
+    #   data_graph: fed.data                #   statement and one transaction.
+    # source: remote     # identity resolved over a SECOND connection, from
+    #   remote_env_prefix: IDENTITY         #   IDENTITY_NEO4J_URI etc. in .env
+```
+
+`composite` and `remote` make the identity store independent — its own instance,
+credentials and lifecycle, shareable across domains. Both cost the same three
+things, because the caller node cannot reach the data query:
+
+| Kept | Lost |
+| --- | --- |
+| per-caller row filtering, post-filter aggregates, curated-only posture, conformance harness, `explain-access` | **path grants** (`grant_model` must be `property`), **anchoring**, and tools that scope to `caller` |
+
+The engine **refuses to start** rather than degrading quietly: a separated bundle
+declaring path grants, an anchor, or a tool referencing `caller` fails at load
+with a message saying why. Adding another source (an external entitlement
+service, LDAP, token introspection) means implementing `IdentitySource` and
+registering it — see [`gateway/identity_sources.py`](gateway/identity_sources.py).
+
 Want to try the entitlement model on Aura?
 [`docs/entitlement-testing-tutorial.md`](docs/entitlement-testing-tutorial.md)
-walks through it across four identity/data topologies.
+walks through it across six identity/data topologies.
 
 Shipped bundles: **`ato`** (account-takeover; 7 YAML tools; `mode: open`),
 **`client_platform`** (institutional client platform, up/cross-sell;
-`mode: mediated`) and
+`mode: mediated`), **`client_platform_split`** (the same platform with identity
+in a separate database — see
+[`security.identity.source`](#where-identity-lives)) and
 **`iam`** (investment-bank entitlements; `mode: mediated`, curated tools filtered
 per caller, raw `read-cypher` auto-hidden). Neither bundle contains security
 code — a bundle declares a policy and the engine enforces it.

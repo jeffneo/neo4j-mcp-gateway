@@ -22,7 +22,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gateway.config import Config, active_bundle_names
-from gateway.yaml_tools import Neo4jExecutor, load_tool_specs, resolve_tool_query
+from gateway.yaml_tools import (Neo4jExecutor, load_tool_specs, mediation_params,
+                                resolve_tool_query)
 
 
 # Fail-closed data-quality guard. In a mediated bundle, a business record that is
@@ -53,7 +54,15 @@ def _check_protected_labels(config, executor) -> int:
 
     print(f"  entitlement data check ({policy.permissions_property} on "
           f"{', '.join(policy.protected_labels)}):")
-    rows = executor.run(_MISSING_ACL_QUERY,
+    # Under a composite identity source the bundle connects to the COMPOSITE
+    # database, where a bare MATCH is rejected — every graph operation must name
+    # a constituent. The probe is about business records, so it targets the data
+    # graph. (The dynamic $prop key is safe here because it is evaluated INSIDE
+    # the USE block; see COMPOSITE_PROPERTY_ACCESS in gateway/mediation.py.)
+    query = _MISSING_ACL_QUERY
+    if policy.identity.source == "composite":
+        query = query.replace("  WITH label\n", f"  USE {policy.identity.data_graph}\n  WITH label\n")
+    rows = executor.run(query,
                         {"labels": policy.protected_labels, "prop": policy.permissions_property},
                         read_only=True)
     failures = 0
@@ -69,17 +78,11 @@ def _check_protected_labels(config, executor) -> int:
 
 def _personas_from_graph(config, executor, limit: int = 6) -> list[str]:
     """Pick a few real principals out of the identity graph to diff against."""
-    policy = config.security
-    query = (
-        "MATCH (u) WHERE any(l IN labels(u) WHERE l IN $labels) "
-        "RETURN head([k IN $keys WHERE u[k] IS NOT NULL | u[k]]) AS p LIMIT $limit"
-    )
-    rows = executor.run(
-        query,
-        {"labels": policy.identity.labels, "keys": policy.identity.match_keys, "limit": limit},
-        read_only=True,
-    )
-    return [r["p"] for r in rows if r.get("p")]
+    # Ask the identity SOURCE, not the data connection: with a separated source
+    # the people live somewhere else entirely, and with a composite source a bare
+    # MATCH is rejected outright.
+    from gateway.identity_sources import get_identity_source
+    return get_identity_source(config, executor).sample_principals(limit)
 
 
 def _check_entitlement_differentiation(config, executor, specs) -> int:
@@ -122,7 +125,7 @@ def _check_entitlement_differentiation(config, executor, specs) -> int:
         results = {}
         for who in personas:
             params = _args_for(spec)
-            params.update(mediation.security_params(policy, who))
+            params.update(mediation_params(config, who, executor))
             query = mediation.compose(policy, spec.match_clause, spec.scope,
                                       spec.return_clause.strip(), spec.protect)
             results[who] = len(executor.run(query, params, read_only=True))
@@ -174,7 +177,7 @@ def _validate_one(bundle: str) -> int:
             params = {p.name: p.default for p in spec.parameters if p.has_default}
             params.update(spec.sample_args)
             try:
-                query, extra = resolve_tool_query(config, spec)
+                query, extra = resolve_tool_query(config, spec, executor=executor)
                 params.update(extra)
                 rows = executor.run(query, params, spec.read_only)
                 print(f"  OK    {spec.name:28} {len(rows)} row(s)")

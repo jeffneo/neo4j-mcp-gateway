@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gateway import mediation
 from gateway.config import Config, active_bundle_names
-from gateway.yaml_tools import Neo4jExecutor, load_tool_specs
+from gateway.yaml_tools import Neo4jExecutor, load_tool_specs, mediation_params
 
 TESTS_FILENAME = "entitlement_tests.yaml"
 
@@ -120,7 +120,7 @@ def _resolve_query(case: dict, specs: dict, policy) -> tuple[str, dict]:
     return query, dict(case.get("args") or {})
 
 
-def _differential(executor, case, specs, policy, principals, id_field) -> list[str]:
+def _differential(executor, config, case, specs, policy, principals, id_field) -> list[str]:
     """Assert derived grants reproduce the materialised ACLs, row for row.
 
     This is the migration argument made checkable: rather than asking anyone to
@@ -138,8 +138,8 @@ def _differential(executor, case, specs, policy, principals, id_field) -> list[s
         for principal in principals:
             base_q, base_args = _resolve_query(case, specs, baseline)
             cand_q, cand_args = _resolve_query(case, specs, candidate)
-            base = sorted(map(str, _seen(executor, baseline, base_q, base_args, principal, id_field)))
-            cand = sorted(map(str, _seen(executor, candidate, cand_q, cand_args, principal, id_field)))
+            base = sorted(map(str, _seen(executor, config, base_q, base_args, principal, id_field)))
+            cand = sorted(map(str, _seen(executor, config, cand_q, cand_args, principal, id_field)))
             if base != cand:
                 only_acl = sorted(set(base) - set(cand))
                 only_new = sorted(set(cand) - set(base))
@@ -153,8 +153,8 @@ def _differential(executor, case, specs, policy, principals, id_field) -> list[s
     return failures
 
 
-def _seen(executor, policy, query: str, args: dict, principal: str, id_field: str) -> list:
-    params = {**args, **mediation.security_params(policy, principal)}
+def _seen(executor, config, query: str, args: dict, principal: str, id_field: str) -> list:
+    params = {**args, **mediation_params(config, principal, executor)}
     rows = executor.run(query, params, read_only=True)
     for row in rows:
         if id_field not in row:
@@ -185,7 +185,7 @@ def _check_assertions(case: dict, principal: str, seen: list) -> list[str]:
     return failures
 
 
-def run_case(executor, policy, specs: dict, case: dict, verbose: bool) -> tuple[bool, list[str]]:
+def run_case(executor, config, policy, specs: dict, case: dict, verbose: bool) -> tuple[bool, list[str]]:
     name = case.get("name", "<unnamed>")
     id_field = case.get("id_field")
     if not id_field:
@@ -203,15 +203,15 @@ def run_case(executor, policy, specs: dict, case: dict, verbose: bool) -> tuple[
     failures: list[str] = []
     results: dict[str, list] = {}
     for principal in principals:
-        seen = _seen(executor, policy, query, args, principal, id_field)
+        seen = _seen(executor, config, query, args, principal, id_field)
         results[principal] = seen
         failures.extend(_check_assertions(case, principal, seen))
 
         # An anchored tool must return exactly what it would unanchored.
         if anchored_pair:
             anchored_q, plain_q, a_args = anchored_pair
-            a_seen = _seen(executor, policy, anchored_q, a_args, principal, id_field)
-            p_seen = _seen(executor, policy, plain_q, a_args, principal, id_field)
+            a_seen = _seen(executor, config, anchored_q, a_args, principal, id_field)
+            p_seen = _seen(executor, config, plain_q, a_args, principal, id_field)
             if sorted(map(str, a_seen)) != sorted(map(str, p_seen)):
                 missing = set(map(str, p_seen)) - set(map(str, a_seen))
                 extra = set(map(str, a_seen)) - set(map(str, p_seen))
@@ -224,7 +224,7 @@ def run_case(executor, policy, specs: dict, case: dict, verbose: bool) -> tuple[
         if verbose:
             print(f"      {principal:28} -> {seen}")
 
-    failures.extend(_differential(executor, case, specs, policy, principals, id_field))
+    failures.extend(_differential(executor, config, case, specs, policy, principals, id_field))
 
     # same_for: every principal must get an identical result set.
     if case.get("same_for"):
@@ -271,7 +271,7 @@ def main(argv: list[str]) -> int:
         for case in cases:
             name = case.get("name", "<unnamed>")
             try:
-                ok, failures = run_case(executor, policy, specs, case, args.verbose)
+                ok, failures = run_case(executor, config, policy, specs, case, args.verbose)
             except CaseError as exc:
                 ok, failures = False, [str(exc)]
             except Exception as exc:  # noqa: BLE001 - a broken query is a failed case
