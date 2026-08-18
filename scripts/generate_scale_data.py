@@ -13,7 +13,7 @@ performance.
 Shape (mirrors the IAM bundle's model, so mediated tools work unchanged):
 
     (:User)-[:MEMBER_OF]->(:AdGroup)          salespeople in coverage teams
-    (:Client {coverageTeam})                  each client covered by one team
+    (:Client)-[:COVERED_BY]->(:AdGroup)       each client covered by one team
     (:Trade)-[:FOR_CLIENT]->(:Client)         business records carrying an ACL
     Trade.`Permissions.Read` = [coverage team, desk, compliance, booker]
 
@@ -103,6 +103,18 @@ def generate(session, clients: int, teams: int, salespeople: int,
           }})
         }} IN TRANSACTIONS OF {BATCH} ROWS
     """, {"clients": clients, "teams": teams}, "clients")
+
+    # Coverage as a relationship, not only a property: path-derived grants and
+    # anchored queries traverse this instead of matching on a string.
+    _run(session, f"""
+        UNWIND range(0, $clients - 1) AS i
+        CALL {{
+          WITH i
+          MATCH (c:Client {{clientId: 'CL-' + toString(i)}})
+          MATCH (g:AdGroup {{name: c.coverageTeam}})
+          MERGE (c)-[:COVERED_BY]->(g)
+        }} IN TRANSACTIONS OF {BATCH} ROWS
+    """, {"clients": clients}, "client -> coverage team edges")
 
     # Business records carrying the ACL. Entitlement mirrors the demo model:
     # the covering team, the owning desk, settlements, and supervision.

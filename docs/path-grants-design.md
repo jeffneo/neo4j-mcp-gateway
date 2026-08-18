@@ -188,6 +188,37 @@ that range. The `NOT var:Label` guard short-circuits before the traversal, so a
 bundle may declare grants for many record types without penalty on queries that
 touch few.
 
+### Selectivity sweep
+
+Anchoring's advantage depends entirely on how much of the population the caller
+can see, so the headline number must be quoted with its ratio.
+`scripts/sweep_selectivity.py` measures the curve (100,000 clients / 100,000
+trades; identical results at every point):
+
+| caller sees | scan | anchored | speedup | db-hit ratio |
+| --- | --- | --- | --- | --- |
+| 0.5% (500 clients) | 95.9 ms | 2.4 ms | **40×** | 56× |
+| 1% (1,000) | 98.3 ms | 3.0 ms | **33×** | 37× |
+| 5% (5,000) | 130.0 ms | 8.2 ms | 16× | 10× |
+| 10% (10,000) | 162.0 ms | 13.7 ms | 12× | 5.5× |
+| 25% (25,000) | 242.1 ms | 38.7 ms | 6× | 2.4× |
+| 50% (50,000) | 316.7 ms | 97.2 ms | 3× | 1.3× |
+| 66% (66,000) | 94.9 ms | 91.5 ms | 1.0× | 1.1× |
+| 75% (75,000) | 94.7 ms | 104.0 ms | 0.9× | 1.0× |
+| 100% (100,000) | 89.7 ms | 126.9 ms | 0.7× | 0.8× |
+
+**Anchoring pays below roughly 70% visibility and is a slight net cost above it.**
+Anchored cost rises monotonically with the caller's reachable set, as expected —
+it reads what the caller can see.
+
+The scan curve is not monotonic, which is worth understanding rather than
+dismissing as noise: it peaks near 50% and then *falls*. `any(x IN acl WHERE
+x IN principals)` short-circuits on a match but scans the whole ACL on a miss,
+and the principal list itself grows with visibility. Cost therefore approximates
+`misses x |acl| x |principals| + hits x 1 x |principals|`, which is maximised when
+about half the rows miss. **List-ACL filtering is most expensive at intermediate
+selectivity, not at full visibility.**
+
 ### Consequences for the design
 
 - Path grants ship for their **semantics**, not their speed. A bundle that adopts
@@ -198,6 +229,15 @@ touch few.
 - Anchoring is where the investment pays, and it is independent of grant model —
   **anchored + ACL is the fastest combination measured**. It should therefore be
   built first, and can ship before path grants entirely.
+- **Anchoring must stay opt-in per tool**, as designed. An automatic anchor would
+  penalise broad-visibility callers, and the sweep shows that cost is real above
+  ~70%. Note the subtlety: the anchor is declared on a *tool*, but its benefit
+  depends on the *caller* — one tool may serve a salesperson at 1% visibility and
+  a supervisor at 100%. The mix decides. Where most callers are narrow and a few
+  are broad, it is strongly net positive.
+- A future refinement, not proposed here: the prelude already knows the caller's
+  reachable set, so the engine could choose anchored or scanning per call. Worth
+  revisiting only if a real deployment has a genuinely bimodal caller population.
 
 Secondary risks: grant patterns are interpolated into Cypher, so they are
 author-trusted config at the same level as a tool's own query (never caller
