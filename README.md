@@ -337,7 +337,9 @@ Shipped bundles: **`ato`** (account-takeover; 7 YAML tools; `mode: open`),
 **`client_platform`** (institutional client platform, up/cross-sell;
 `mode: mediated`), **`client_platform_split`** (the same platform with identity
 in a separate database — see
-[`security.identity.source`](#where-identity-lives)) and
+[`security.identity.source`](#where-identity-lives)),
+**`asset_platform`** (sector-classified asset universe; taxonomy-scoped
+entitlement, two caller classes, dated scopes) and
 **`iam`** (investment-bank entitlements; `mode: mediated`, curated tools filtered
 per caller, raw `read-cypher` auto-hidden). Neither bundle contains security
 code — a bundle declares a policy and the engine enforces it.

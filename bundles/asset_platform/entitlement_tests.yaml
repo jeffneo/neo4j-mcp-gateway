@@ -1,0 +1,251 @@
+# Entitlement conformance for the asset platform.
+#
+#   ACTIVE_BUNDLE=asset_platform uv run python scripts/check_entitlements.py
+#
+# This bundle exists to assert three shapes the others do not reach: entitlement
+# scoped to a node in a CLASSIFICATION HIERARCHY, TWO CALLER CLASSES with
+# different rules, and a scope with a VALIDITY WINDOW.
+#
+# NOTE ON THE ABSENCE OF A `differential:` CASE. Elsewhere that case proves the
+# derived model reproduces the materialised one. Here it would fail by design:
+# access-control lists on documents name only the author and supervision, while
+# the sector scope, coverage and attendance routes reach considerably further. The
+# list model is provably coarser than the rules it is meant to encode, which is
+# the argument for path grants rather than a defect in either. The `iam` bundle
+# carries the differential demonstration.
+
+cases:
+  # ---------------------------------------------------------------------------
+  # 1. TAXONOMY-SCOPED ENTITLEMENT
+  #
+  # The route is: role -> SCOPED_TO -> Sector, then DOWN the hierarchy to the
+  # SubIndustry, then to the asset, then to the document. Two NARROWER_THAN hops.
+  # ---------------------------------------------------------------------------
+
+  # DOC-4 is the isolation case. Ella did not write it, does not cover the
+  # organisation it went to, and is not named in its access-control list. The
+  # ONLY route is Energy -> Utilities -> Power Generation -> AURGD -> DOC-4.
+  # If the hierarchy traversal breaks, this is the case that fails.
+  - name: sector scope alone reaches a document two taxonomy hops away
+    principal: ella.moreau@bank.com
+    tool: asset_research
+    id_field: docId
+    must_see: [DOC-4]
+
+  - name: sector scope is bounded by sector, not merely by depth
+    principal: ella.moreau@bank.com
+    tool: asset_research
+    id_field: docId
+    must_see: [DOC-1, DOC-4]        # both Energy
+    must_not_see: [DOC-2]           # Technology — same depth, different branch
+
+  - name: the technology researcher sees the mirror image
+    principal: raj.patel@bank.com
+    tool: asset_research
+    id_field: docId
+    must_see: [DOC-2]
+    must_not_see: [DOC-1, DOC-4]
+    expect_count: 1
+
+  # ---------------------------------------------------------------------------
+  # 2. A SCOPE WITH A VALIDITY WINDOW
+  #
+  # Yuki's role is scoped to Technology, but the window closed in 2024. She sees
+  # DOC-4 because she wrote it, and NOT DOC-2 which her expired scope would
+  # otherwise reach. This is what makes the window load-bearing rather than
+  # decorative — an entitlement graph is a statement about a moment in time.
+  # ---------------------------------------------------------------------------
+  - name: an expired scope grants nothing
+    principal: yuki.tanaka@bank.com
+    tool: asset_research
+    id_field: docId
+    must_see: [DOC-4]               # authorship and coverage, neither windowed
+    must_not_see: [DOC-2]           # her Technology scope expired in 2024
+    expect_count: 1
+
+  # And the scope map only lists windows in force, so the expired one is absent
+  # from it as well — the same fact asserted from the metadata side.
+  - name: an expired scope is absent from the active scope map
+    principal: dana.whitfield@bank.com
+    tool: active_scope_map
+    id_field: role
+    must_see: [research-energy, research-tech]
+    must_not_see: [sales-apac]      # scoped to Technology, but only through 2024
+
+  # ---------------------------------------------------------------------------
+  # 3. TWO CALLER CLASSES
+  #
+  # An external client user reaches their own organisation's research and nothing
+  # else. An internal employee never reaches content by that route, whatever else
+  # holds. The rules are distinguished by a label on the CALLER.
+  # ---------------------------------------------------------------------------
+  - name: a client user sees research distributed to their own organisation
+    principal: mia.torres@northwind.com
+    tool: asset_research
+    id_field: docId
+    must_see: [DOC-1]
+    must_not_see: [DOC-2, DOC-4]    # other organisations' research
+    expect_count: 1
+
+  - name: a second client user sees a different organisation's research
+    principal: liam.becker@kestrel.com
+    tool: asset_research
+    id_field: docId
+    must_see: [DOC-2]
+    must_not_see: [DOC-1, DOC-4]
+    expect_count: 1
+
+  # Distribution alone must not entitle an employee — only coverage does. Oscar
+  # covers Northwind and Kestrel, so he sees their research; DOC-4 went to Aster,
+  # which he does not cover, and he has no sector scope to fall back on.
+  - name: an employee reaches distributed research only where they cover
+    principal: oscar.lindgren@bank.com
+    tool: asset_research
+    id_field: docId
+    must_see: [DOC-1, DOC-2]
+    must_not_see: [DOC-4]
+    expect_count: 2
+
+  # ---------------------------------------------------------------------------
+  # 4. COVERAGE, AND A BARRIER THAT OVERRIDES IT
+  # ---------------------------------------------------------------------------
+  - name: coverage reaches interactions with the covered organisation
+    principal: oscar.lindgren@bank.com
+    tool: client_interactions
+    id_field: interactionId
+    must_see: [INT-1]
+    expect_count: 1
+
+  # Sam genuinely covers Rivermark. The restriction on his desk withdraws access
+  # he holds — it is not the absence of a grant, and removing a grant could not
+  # have expressed it.
+  - name: a desk restriction overrides coverage the caller genuinely holds
+    principal: sam.okoye@bank.com
+    tool: client_interactions
+    id_field: interactionId
+    must_not_see: [INT-2]
+    expect_count: 0
+
+  - name: the restriction is desk-scoped and does not reach supervision
+    principal: dana.whitfield@bank.com
+    tool: client_interactions
+    id_field: interactionId
+    must_see: [INT-1, INT-2]
+
+  - name: attendance reaches an interaction a client user took part in
+    principal: mia.torres@northwind.com
+    tool: client_interactions
+    id_field: interactionId
+    must_see: [INT-1]
+    expect_count: 1
+
+  # ---------------------------------------------------------------------------
+  # 5. AN EMBARGO — a denial that is a condition on the row, no traversal at all
+  #
+  # DOC-3 is invisible to its own author and to supervision. Both hold genuine
+  # grants: Ella wrote it and is named in its list; Dana's role is named too.
+  # A denial beats every route.
+  # ---------------------------------------------------------------------------
+  - name: an embargo hides a document from its own author
+    principal: ella.moreau@bank.com
+    tool: asset_research
+    id_field: docId
+    must_not_see: [DOC-3]
+
+  - name: an embargo hides a document from supervision
+    principal: dana.whitfield@bank.com
+    tool: asset_research
+    id_field: docId
+    must_see: [DOC-1, DOC-2, DOC-4]
+    must_not_see: [DOC-3]
+
+  # ---------------------------------------------------------------------------
+  # 6. REFERENCE DATA MUST FLOW, OR EVERY JOIN THROUGH IT BREAKS
+  #
+  # The asset universe is public securities. Asserting that it is identical for
+  # every caller — internal and external — is what catches a filter that has
+  # started governing reference data, a failure that presents as an entitlement
+  # bug rather than a configuration one.
+  # ---------------------------------------------------------------------------
+  - name: the asset universe is reference data and identical for every caller
+    same_for:
+      - ella.moreau@bank.com
+      - oscar.lindgren@bank.com
+      - dana.whitfield@bank.com
+      - mia.torres@northwind.com
+      - liam.becker@kestrel.com
+    tool: asset_universe
+    id_field: ticker
+
+  # ---------------------------------------------------------------------------
+  # 7. AGGREGATES ARE COMPUTED AFTER FILTERING
+  # ---------------------------------------------------------------------------
+  - name: a document count reflects only what the caller may see
+    principal: raj.patel@bank.com
+    match: "MATCH (d:Document)-[:WAS_ABOUT]->(a:Asset)"
+    scope: [d, a]
+    protect: [d]
+    return: "RETURN count(d) AS id"
+    id_field: id
+    must_see: [1]
+
+  - name: supervision counts more, but not the embargoed document
+    principal: dana.whitfield@bank.com
+    match: "MATCH (d:Document)-[:WAS_ABOUT]->(a:Asset)"
+    scope: [d, a]
+    protect: [d]
+    return: "RETURN count(d) AS id"
+    id_field: id
+    must_see: [3]
+
+  # ---------------------------------------------------------------------------
+  # 8. INVARIANTS — questions about the model, not about a caller.
+  #
+  # These run unmediated over the whole graph. No tool exposes them and the
+  # gateway never runs them; they belong in CI and in a control-room review.
+  # ---------------------------------------------------------------------------
+
+  - name: "invariant: every ACL entry names a principal that exists"
+    invariant: |
+      MATCH (n) WHERE n.`Permissions.Read` IS NOT NULL
+      UNWIND n.`Permissions.Read` AS entry
+      WITH DISTINCT entry
+      WHERE entry <> 'everyone'
+        AND NOT EXISTS { MATCH (r:Role {name: entry}) }
+        AND NOT EXISTS { MATCH (r:ClientRole {name: entry}) }
+        AND NOT EXISTS { MATCH (e:Employee {email: entry}) }
+        AND NOT EXISTS { MATCH (c:ClientUser {email: entry}) }
+      RETURN entry AS danglingPrincipal
+    expect_count: 0
+
+  # An asset with no classification is unreachable by any sector scope. It would
+  # not leak — it would silently disappear from every researcher's view, which is
+  # the failure direction nobody notices.
+  - name: "invariant: every asset is classified at the taxonomy leaf"
+    invariant: |
+      MATCH (a:Asset)
+      WHERE NOT EXISTS { MATCH (a)-[:CLASSIFIED_AS]->(:SubIndustry) }
+      RETURN a.ticker AS unclassifiedAsset
+    expect_count: 0
+
+  # The taxonomy must be exactly three levels with one direction. A SubIndustry
+  # that does not reach a Sector in two hops means the hierarchy is broken, and
+  # every bounded scope rule silently under-grants.
+  - name: "invariant: every sub-industry reaches a sector in exactly two hops"
+    invariant: |
+      MATCH (si:SubIndustry)
+      WHERE NOT EXISTS { MATCH (si)-[:NARROWER_THAN*2]->(:Sector) }
+      RETURN si.name AS orphanedSubIndustry
+    expect_count: 0
+
+  # A role that is neither scoped to a sector nor a control role entitles its
+  # holders to nothing through the sector route. Sales roles are legitimately in
+  # this position — they work through coverage — so this records the expected
+  # count rather than asserting zero, and any NEW unscoped role breaks the build.
+  - name: "invariant: no unexpected role lacks both a scope and a control kind"
+    invariant: |
+      MATCH (r:Role)
+      WHERE r.kind <> 'control'
+        AND NOT EXISTS { MATCH (r)-[:SCOPED_TO]->(:Sector) }
+      RETURN r.name AS unscopedRole ORDER BY unscopedRole
+    expect_count: 1

@@ -434,6 +434,25 @@ the argument in §6 of `entitlement-model-brief.md`, unchanged.
   when its endpoints matched, so this is acceptable but worth stating.
 - **No provenance.** Grants are values in a list, with no grantor or date (§1).
 
+### `scope` accepts node variables only
+
+The filter applies a label predicate to every variable in `scope`, so a
+relationship variable fails with `Type mismatch: expected Node`. A relationship
+property can therefore be used to FILTER inside `match` but cannot be projected in
+`return`:
+
+```yaml
+match: |
+  MATCH (r:Role)-[sc:SCOPED_TO]->(s:Sector)
+  WHERE sc.validFrom <= date() AND sc.validTo >= date()   # filtering: fine
+scope: [r, s]                                             # sc must NOT be here
+return: "RETURN r.name AS role, s.name AS sector"         # sc.validTo: not available
+```
+
+This matters for dated entitlements, where the window lives on the relationship.
+Filtering on it works; reporting it needs the value copied onto a node, or the
+question rephrased as "which scopes are in force" — usually the more useful one.
+
 ## 7. Deliberately not included
 
 Left out until a concrete requirement justifies them; the design does not

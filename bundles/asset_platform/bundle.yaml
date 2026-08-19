@@ -1,0 +1,115 @@
+# Asset platform — research and client content over a sector-classified asset
+# universe, with two caller classes. Select with: ACTIVE_BUNDLE=asset_platform
+#
+# The shapes this bundle exists to prove, none of which the other bundles cover:
+#
+#   1. TAXONOMY-SCOPED entitlement — a role is scoped to a Sector, and an asset
+#      is reached by traversing UP a classification hierarchy of variable depth.
+#   2. TWO CALLER CLASSES — internal Employee and external ClientUser, with rules
+#      that must apply to one and not the other.
+#   3. A DATED ENTITLEMENT — the scope has a validity window, evaluated at query
+#      time rather than materialised.
+name: neo4j-asset-platform-gateway
+description: Asset research platform — sector-scoped entitlements across internal and client callers.
+
+instructions: >
+  This gateway serves an INSTITUTIONAL ASSET PLATFORM. Research documents, client
+  interactions and corporate-access meetings are all ABOUT assets, and assets are
+  classified under a single sector taxonomy (Sector -> Industry -> SubIndustry,
+  with assets attached at the SubIndustry leaf). Entities: Asset, Document,
+  Interaction, Meeting, AssetClass, Issuer, Sector, Industry, SubIndustry,
+  ClientOrg, plus Employee, ClientUser, Role, ClientRole, Desk, BusinessUnit,
+  Division and Region on the identity side.
+  There are TWO kinds of caller. An internal Employee reaches content through the
+  sectors their role is scoped to, the client organisations they cover, and what
+  they authored or attended. An external ClientUser reaches only their own
+  organisation's content and the meetings they signed up for. Never assume a rule
+  that applies to one applies to the other.
+  Assets, documents, interactions and meetings are permissioned; the taxonomy,
+  asset classes, issuers and client organisations are reference data.
+  WORKFLOW: call resolve-identity first to establish who you are acting as, then
+  use the curated usecase_ tools. Results are already filtered to the caller's
+  entitlements, so never describe a result as the complete picture. Use
+  explain-access to answer "why can I see this?". Raw read-cypher is unavailable
+  because it would bypass the filter.
+
+# Connection is env-only. Drop a git-ignored .env here to point this bundle at
+# its own instance — see docs/entitlement-testing-tutorial.md.
+
+security:
+  mode: mediated
+  permissions_property: "Permissions.Read"
+  protected_labels: [Document, Interaction, Meeting]
+
+  identity:
+    # Two caller classes resolved by the same prelude.
+    labels: [Employee, ClientUser]
+    match_keys: [email]
+    # A principal here is a ROLE name, not a group name. Nothing in the engine
+    # assumes the relationship is called MEMBER_OF — it is config.
+    group_rels: [HAS_ROLE, HAS_CLIENT_ROLE]
+    group_name_keys: [name]
+
+  # 'both' because the two routes differ in kind and neither subsumes the other.
+  # Role and author entitlements are naturally list entries; sector scope,
+  # coverage, authorship and attendance are naturally traversals.
+  grant_model: both
+  grants:
+    # --- 1. TAXONOMY SCOPE -------------------------------------------------
+    # The shape no list can express: entitlement to a Sector, with the record
+    # reached by walking UP a classification hierarchy. Bounded at 2 hops because
+    # the taxonomy is exactly three levels deep — an unbounded walk over a
+    # classification tree is how these rules start granting everything.
+    - label: Document
+      via: "(caller)-[:HAS_ROLE]->(:Role)-[sc:SCOPED_TO]->(:Sector)<-[:NARROWER_THAN*1..2]-(:SubIndustry)<-[:CLASSIFIED_AS]-(:Asset)<-[:WAS_ABOUT]-(resource)"
+      where: "sc.validFrom <= date() AND sc.validTo >= date()"
+      reason: "role is scoped to the sector this document's asset classifies under"
+
+    # --- 2. COVERAGE -------------------------------------------------------
+    - label: Interaction
+      via: "(caller)-[:COVERS]->(:ClientOrg)<-[:WITH_ORG]-(resource)"
+      reason: "covers the client organisation this interaction was with"
+    - label: Document
+      via: "(caller)-[:COVERS]->(:ClientOrg)<-[:DISTRIBUTED_TO]-(resource)"
+      reason: "covers a client organisation this document was distributed to"
+
+    # --- 3. PERSONAL INVOLVEMENT -------------------------------------------
+    - label: Document
+      via: "(caller)<-[:AUTHORED_BY]-(resource)"
+      reason: "authored this document"
+    - label: Interaction
+      via: "(caller)-[:PARTICIPATED_IN]->(resource)"
+      reason: "participated in this interaction"
+
+    # --- 4. THE CLIENT-SIDE RULES -----------------------------------------
+    # Labelled on the caller, so they apply to external users only. An internal
+    # employee never reaches content this way even if the rest of the path holds.
+    - label: Document
+      via: "(caller:ClientUser)-[:WORKS_FOR]->(:ClientOrg)<-[:DISTRIBUTED_TO]-(resource)"
+      reason: "client user reading research distributed to their own organisation"
+    - label: Meeting
+      via: "(caller:ClientUser)-[:SIGNED_UP_FOR]->(resource)"
+      reason: "signed up for this meeting"
+
+  # Rules that WITHDRAW access someone otherwise holds.
+  denials:
+    # A barrier: the client organisation is restricted for the caller's desk.
+    # Sam covers Rivermark, so his grant is real and this overrides it.
+    - label: Interaction
+      via: "(caller)-[:WORKS_FOR]->(:Desk)<-[:RESTRICTED_FOR]-(:ClientOrg)<-[:WITH_ORG]-(resource)"
+      reason: "the client organisation is restricted for this caller's desk"
+    # An embargo: a condition on the row, no traversal at all. NULL does not
+    # deny, so a document with no `embargoed` property is unaffected.
+    - label: Document
+      where: "resource.embargoed = true"
+      reason: "the document is under pre-publication embargo"
+
+  resource_keys:
+    Asset: ticker
+    Document: docId
+    Interaction: interactionId
+    Meeting: meetingId
+
+downstream:
+  read_only: true
+  # read-cypher is hidden automatically because mode is mediated.

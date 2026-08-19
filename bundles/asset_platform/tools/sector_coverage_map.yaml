@@ -1,0 +1,31 @@
+# Reference metadata: which roles are currently scoped to which sectors, and who
+# holds them. Useful for answering "why can they see that?" without touching a
+# permissioned record.
+#
+# NOTE the validity window is applied in the MATCH rather than reported in the
+# RETURN. `scope` may contain only NODE variables — the entitlement filter applies
+# label predicates to every one of them, and a relationship variable fails with a
+# type mismatch. So a relationship property can be used to FILTER but cannot be
+# projected. Asking for scopes that are in force is the more useful question
+# anyway, so the constraint costs nothing here.
+name: active_scope_map
+description: >
+  Entitlement scopes currently in force — which roles are scoped to which
+  sectors, and who holds them. Reference metadata; returns no business records.
+parameters:
+  - name: sector
+    type: string
+    description: Filter to one sector by name. Empty string returns all.
+    required: false
+    default: ""
+match: |
+  MATCH (r:Role)-[sc:SCOPED_TO]->(s:Sector)
+  WHERE sc.validFrom <= date() AND sc.validTo >= date()
+    AND ($sector = '' OR s.name = $sector)
+  OPTIONAL MATCH (e:Employee)-[:HAS_ROLE]->(r)
+scope: [r, s, e]
+return: |
+  RETURN r.name AS role, r.label AS description, s.name AS sector,
+         count(e) AS holders, collect(e.email) AS heldBy
+  ORDER BY sector, role
+read_only: true

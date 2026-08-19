@@ -1,0 +1,24 @@
+# Interactions with client organisations. The denial case lives here: a caller
+# may cover an organisation and still be barred from it by their desk.
+name: client_interactions
+description: >
+  Client interactions, with the organisation and the asset discussed. Filtered to
+  the caller's entitlements; a restriction on the caller's desk removes an
+  organisation entirely even where coverage would otherwise grant it.
+parameters:
+  - name: org
+    type: string
+    description: Client organisation name. Empty string returns all the caller may see.
+    required: false
+    default: ""
+match: |
+  MATCH (i:Interaction)-[:WITH_ORG]->(o:ClientOrg)
+  WHERE $org = '' OR o.name = $org
+  MATCH (i)-[:WAS_ABOUT]->(a:Asset)
+scope: [i, o, a]
+protect: [i]
+return: |
+  RETURN i.interactionId AS interactionId, i.subject AS subject,
+         o.name AS clientOrg, a.ticker AS ticker
+  ORDER BY interactionId
+read_only: true

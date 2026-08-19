@@ -1,0 +1,22 @@
+# Documents about an asset. Reachable four different ways — sector scope,
+# coverage of a client it was distributed to, authorship, or a client user's own
+# organisation — which is why the same tool returns different rows per caller.
+name: asset_research
+description: >
+  Research documents about a given asset, or all the caller may see. Filtered to
+  the caller's entitlements, so the count is theirs rather than the firm's.
+parameters:
+  - name: ticker
+    type: string
+    description: Asset ticker, e.g. "MEROF". Empty string returns all the caller may see.
+    required: false
+    default: ""
+match: |
+  MATCH (d:Document)-[:WAS_ABOUT]->(a:Asset)
+  WHERE $ticker = '' OR a.ticker = $ticker
+scope: [d, a]
+protect: [d]
+return: |
+  RETURN d.docId AS docId, d.title AS title, a.ticker AS ticker, a.name AS asset
+  ORDER BY docId
+read_only: true

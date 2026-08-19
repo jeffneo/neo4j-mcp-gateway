@@ -1,0 +1,29 @@
+# The reference-data tool. The asset universe is public securities: it flows to
+# every caller, internal or external, identically. That is worth asserting rather
+# than assuming — a filter that accidentally governs reference data breaks every
+# join through it, and the failure presents as an entitlement bug.
+#
+# NOTE what is deliberately absent: `protect:`. Naming a reference-data variable
+# there makes the check STRICT, which denies anything carrying no access-control
+# list — i.e. all of it. An earlier version of this tool did exactly that and
+# returned nothing to anybody.
+name: asset_universe
+description: >
+  The asset universe with its sector classification, class and issuer. Reference
+  data: identical for every caller.
+parameters:
+  - name: sector
+    type: string
+    description: Filter to one sector by name. Empty string returns all.
+    required: false
+    default: ""
+match: |
+  MATCH (a:Asset)-[:CLASSIFIED_AS]->(si:SubIndustry)-[:NARROWER_THAN]->(ind:Industry)-[:NARROWER_THAN]->(s:Sector)
+  WHERE $sector = '' OR s.name = $sector
+  MATCH (a)-[:OF_CLASS]->(ac:AssetClass)
+scope: [a, si, ind, s, ac]
+return: |
+  RETURN a.ticker AS ticker, a.name AS asset, s.name AS sector,
+         ind.name AS industry, si.name AS subIndustry, ac.name AS assetClass
+  ORDER BY sector, industry, ticker
+read_only: true
