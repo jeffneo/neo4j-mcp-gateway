@@ -298,10 +298,24 @@ def main(argv: list[str]) -> int:
     ap.add_argument("bundle", nargs="?", help="bundle name (default: active bundle)")
     ap.add_argument("--case", help="only run cases whose name contains this substring")
     ap.add_argument("--verbose", action="store_true", help="print what each principal saw")
+    # TOPOLOGY SWEEP. The same cases, with identity resolved somewhere else.
+    #
+    # Worth having its own flag because a whole class of defect is invisible until
+    # the topology moves: co-located, an author's `where` is the only thing in its
+    # subquery's WHERE, while separated it is COMPOSED with the cut predicate. An
+    # unbracketed top-level `OR` in that predicate is harmless in the first case
+    # and a disclosure in the second — which is exactly how one was found here.
+    # Run this in CI beside the default, for every topology a deployment may use.
+    ap.add_argument("--identity-source", choices=["graph", "composite", "remote"],
+                    help="override security.identity.source for this run, so the same "
+                         "cases are asserted under a separated-identity topology")
     args = ap.parse_args(argv)
 
     config = Config.from_env(active_bundle=args.bundle or active_bundle_names()[0])
     policy = config.security
+    if args.identity_source and args.identity_source != policy.identity.source:
+        policy.identity.source = args.identity_source
+        print(f"  [topology override: identity.source = {args.identity_source}]")
     if not policy.mediated:
         print(f"bundle '{config.active_bundle}' is security.mode: {policy.mode} — "
               "entitlement conformance only applies to a mediated bundle.", file=sys.stderr)

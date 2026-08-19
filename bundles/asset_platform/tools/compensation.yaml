@@ -1,0 +1,44 @@
+# Compensation. The smallest complete statement of the problem this gateway
+# exists to solve, and the example that comes up first in every conversation about
+# it: everyone sees their own, a manager sees their reports', and only a managing
+# director sees the unit's.
+#
+# In a relational world that is a JOIN between the compensation table and the
+# business_hierarchy view, written once per application that needs it, differently
+# each time. Here it is three declared rules over edges that already exist for
+# other reasons — and note that no edge was added to make it work.
+#
+# TWO THRESHOLDS DECIDE IT, not two principals. `rankLevel >= 4` and
+# `rankLevel >= 5` are comparisons against an attribute of the caller, resolved
+# once in the prelude. A set of principal names cannot express either without
+# minting a principal per rank and re-issuing it on every promotion.
+#
+# Compensation carries NO access-control list, deliberately: it is governed by
+# path grants alone, which makes this the tool that proves the path model standing
+# on its own. Supervisory review does not read it.
+#
+# The Employee the record belongs to is reference data here — a name and an
+# employee id, not the secret. The number is the secret.
+name: compensation
+description: >
+  Employee compensation for the fiscal year. Filtered to the caller's
+  entitlements: everyone sees their own, a manager from executive director sees
+  their reporting line's, and a managing director sees their unit's.
+parameters:
+  - name: employee_email
+    type: string
+    description: Restrict to one employee by email. Empty string returns all the caller may see.
+    required: false
+    default: ""
+match: |
+  MATCH (c:Compensation)-[:COMPENSATION_OF]->(e:Employee)
+  WHERE $employee_email = '' OR e.email = $employee_email
+  OPTIONAL MATCH (e)-[:IN_UNIT]->(u:OrgUnit)
+scope: [c, e, u]
+protect: [c]
+return: |
+  RETURN c.compId AS compId, e.email AS employee, e.title AS title,
+         u.name AS unit, c.baseSalary AS baseSalary, c.bonus AS bonus,
+         c.totalComp AS totalComp
+  ORDER BY compId
+read_only: true

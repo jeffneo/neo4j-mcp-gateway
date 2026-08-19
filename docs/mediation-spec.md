@@ -439,24 +439,37 @@ uv run python scripts/entitlement_surface.py asset_platform
 That produces the artefact a security review wants: the exact set of relationship
 types and properties whose modification changes who can read what.
 
-### Three categories, and the middle one carries the risk
+### The split that decides governance is WRITE OWNERSHIP
 
-| | | Governance |
+Everything above comes out of the rules. Who *writes* each edge does not — it is a
+deployment fact, declared once in `security.ingested_rels` as
+`relationship type -> the feed that writes it`. Anything absent from that map is
+**authored**: no automated writer, so a database role can be denied write on it
+outright.
+
+| | Authored | Feed-written |
 | --- | --- | --- |
-| **Policy** | exists only to express entitlement — `SCOPED_TO`, `RESTRICTED_FOR` | tightest change control; these are the crown jewels |
-| **Dual-purpose** | a business fact a rule traverses — `AUTHORED_BY`, `COVERS`, `CLASSIFIED_AS`, `IN_UNIT` | **the dangerous one.** Written by the business feed, and a routine edit silently moves access. Reassigning coverage in a CRM changes who can read |
-| **Data** | named by no rule — `ISSUED_BY`, `OF_CLASS` | normal data governance |
+| `asset_platform` | `SCOPED_TO`, `RESTRICTED_FOR`, `HAS_ROLE`, `HAS_CLIENT_ROLE` | the other 18 |
+| Control available | `DENY … ON GRAPH … RELATIONSHIP` — absolute, needs no testing | change review, conformance in CI after every load |
+| Generate it | `entitlement_surface.py --write-guard <role>` | — |
 
-The mitigation for the middle category is knowing the list, which is why it is
-computed rather than remembered.
+Four out of twenty-two is the honest measure of how much of an entitlement model
+can be put behind a write privilege, and it is why the rest is answered by testing.
+
+**A parallel "entitlement-only" copy of a feed-written edge does not fix this.** A
+derived rail moves the same upstream edit one step downstream and adds a staleness
+failure nothing in the query can detect. A rail is worth minting when you need to
+revoke someone's ability to *write* it — not to tidy the diagram. Full argument in
+[entitlement-edges.md](entitlement-edges.md).
 
 ### Polarity is per rule, not per edge
 
 A type traversed by a grant enables; by a denial, disables; and the same type does
-both — in `asset_platform`, `WITH_ORG` and `WORKS_FOR` each appear in a grant and
-in a denial. The graph therefore cannot be coloured red and green; you have to name
-the rule. This is why *"authorised iff there is an enabling path and no disabling
-path"* operationalises as *"matches a grant pattern and no denial pattern"*.
+both — in `asset_platform`, `IN_UNIT`, `WITH_ORG` and `WITH_COUNTERPARTY` each
+appear in a grant and in a denial. The graph therefore cannot be coloured red and
+green; you have to name the rule. This is why *"authorised iff there is an enabling
+path and no disabling path"* operationalises as *"matches a grant pattern and no
+denial pattern"*.
 
 ### The drift it detects
 
@@ -464,14 +477,63 @@ A rule that traverses a relationship type absent from the graph can never fire.
 For a grant that under-grants and is caught by a `must_see` failure. **For a denial
 it fails OPEN** — the barrier silently stops applying, and no per-caller test
 notices because nothing is missing from anyone's results. The surface report flags
-it:
+both, and separately flags every barrier resting on a feed-written edge:
 
 ```
-!! DECLARED BUT ABSENT FROM THE GRAPH (2)
-   RESTRICTED_FOR, SIGNED_UP_FOR
+!! BARRIERS THAT DEPEND ON A FEED-WRITTEN EDGE (3)
+   IN_UNIT              written by business_hierarchy
+   WITH_COUNTERPARTY    written by platform_records
+   WITH_ORG             written by platform_records
 ```
 
-Worth running in CI beside the conformance suite.
+The mitigation is an invariant asserting the barrier edges are present — the only
+kind of test that catches a lifted barrier. Worth running in CI beside the
+conformance suite.
+
+## 5e. Caller attributes — thresholds are not principals
+
+`rankLevel >= 5` is an **ordering**, and a set of principal names cannot express
+one. Encoding "managing director or above" as membership means minting a principal
+per rank and re-issuing it on every promotion: the materialisation problem this
+design exists to avoid, in miniature.
+
+`security.identity.caller_attributes` therefore lifts declared properties of the
+caller into `authz.attrs`, resolved once in the prelude:
+
+```yaml
+identity:
+  caller_attributes: [rankLevel]
+grants:
+  - label: Compensation
+    via: "(caller)<-[:REPORTS_TO*1..4]-(:Employee)<-[:COMPENSATION_OF]-(resource)"
+    where: "authz.attrs.rankLevel >= 4"
+```
+
+- **Read once, not per row.** A threshold over a million rows costs one property
+  read, because the attribute is resolved with the principals.
+- **It survives a separated topology.** A scalar crosses a composite or remote
+  boundary where the caller *node* cannot, so thresholds work unchanged under all
+  three `identity.source` values — verified by running the whole suite under each.
+- **NULL fails closed in a grant, OPEN in a denial.** `NULL >= 5` is NULL, so a
+  missing attribute withholds a grant (visible: rows vanish) and withdraws a
+  barrier (invisible). Hence two guards: an undeclared attribute name is rejected
+  at manifest load, and an invariant asserts every caller carries every deciding
+  attribute.
+
+Only `authz.principalId`, `authz.tenantId` and `authz.attrs.<declared>` are
+readable from a rule; anything else is a load-time error.
+
+### The author's predicate is always bracketed
+
+`AND` binds tighter than `OR`, so a `where` containing a top-level `OR` composed
+with the boundary cut predicate parses as `(cut AND a) OR b` — which collapses to
+`true` for any caller satisfying `b`, discarding the predicate that ties the pattern
+to *that* caller. A disclosure, not a wrong count.
+
+The engine brackets author predicates unconditionally. This class of defect is
+invisible co-located, because the predicate is then alone in its subquery, so
+`check_entitlements.py --identity-source remote` exists to assert the same cases
+under a separated topology. Run both in CI.
 
 ## 6. Known limits
 

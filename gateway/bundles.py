@@ -47,6 +47,8 @@ SEPARATED_SOURCES = (SOURCE_COMPOSITE, SOURCE_REMOTE)
 _GRAPH_REF = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z][A-Za-z0-9_-]*)*$")
 # An ACL property key is interpolated into Cypher inside backticks.
 _PROPERTY_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+# A caller-attribute name becomes a bare map key and property lookup in the prelude.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
@@ -135,6 +137,24 @@ class IdentityConfig:
         default_factory=lambda: ["name", "group", "displayName", "email", "mail", "id"]
     )
     inline_group_list: str = "AdGroupList"
+    # CALLER ATTRIBUTES
+    # -----------------
+    # Properties read off the caller node in the prelude and exposed to rules as
+    # ``authz.attrs.<name>``. This exists because a set of principal names cannot
+    # express a THRESHOLD. "Managing directors and above may read the unit's
+    # compensation" is `rankLevel >= 5`; encoding it as membership means minting a
+    # principal per rank and re-minting on every promotion — the role explosion
+    # this engine exists to avoid, in miniature.
+    #
+    # Attributes are read once, in the prelude, so a rule referencing one costs
+    # nothing extra per row, and they cross the identity/data boundary as VALUES,
+    # which means a threshold survives every separated topology unchanged. That is
+    # the opposite of the caller NODE, which does not survive it at all.
+    #
+    # Undeclared attributes are rejected at manifest load rather than evaluating
+    # to NULL: a typo'd threshold in a grant silently under-grants, and in a
+    # denial it silently fails OPEN.
+    caller_attributes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -189,6 +209,23 @@ class SecurityPolicy:
     # yields NULL and absence is not ambiguity. Where absence should deny, write
     # it: coalesce(resource.clearance, 0) < 3. See DENIALS in mediation.py.
     denials: list[Grant] = field(default_factory=list)
+    # Relationship type -> the automated feed that writes it. The one fact about
+    # the entitlement surface that CANNOT be derived from configuration: who owns
+    # the write path is a deployment property, not a rule property.
+    #
+    # It matters more than the rest of the surface, because it separates the
+    # deciding edges somebody can lock down from the ones they cannot:
+    #
+    #   authored (absent here) — no automated writer, so every non-admin role can
+    #       be DENIED write on it. These are the crown jewels.
+    #   feed-written (listed)  — a routine upstream edit moves access, and the feed
+    #       must keep the privilege. No rail and no predicate changes that; the
+    #       controls are the computed list, conformance in CI after every load, and
+    #       above all not letting a DENIAL depend on one.
+    #
+    # scripts/entitlement_surface.py reports both, and flags any denial that rests
+    # on a feed-written edge — the fail-OPEN case.
+    ingested_rels: dict[str, str] = field(default_factory=dict)
     # Label -> the property that identifies one of its rows, e.g. {Trade: tradeId}.
     # Used by explain-access to find the row a question is about.
     resource_keys: dict[str, str] = field(default_factory=dict)
@@ -231,6 +268,41 @@ class BundleManifest:
 _RULE_BLOCKED = re.compile(
     r"\b(return|create|merge|delete|set|remove|drop|detach|call|union|with|match|"
     r"unwind|load\s+csv|use)\b|;")
+
+
+# What a rule may read off the resolved caller. `attrs` is the extension point;
+# the other two were already in the map and are occasionally the right answer.
+_AUTHZ_FIELDS = ("principalId", "tenantId", "attrs")
+_AUTHZ_REF = re.compile(r"\bauthz\.(\w+)(?:\.(\w+))?")
+
+
+def _check_authz_refs(where_: str, cond: str, identity: IdentityConfig) -> None:
+    """Fail a rule that reads something the prelude does not put in ``authz``.
+
+    An undeclared attribute is not a syntax error in Cypher — it evaluates to
+    NULL, so `authz.attrs.rankLevl >= 5` is simply never true. In a GRANT that
+    under-grants and a conformance case catches it. In a DENIAL the barrier
+    silently stops applying and nothing catches it, because no caller's results
+    are missing anything. So this is checked at load, not discovered in testing.
+    """
+    for field_name_, attr in _AUTHZ_REF.findall(cond):
+        if field_name_ not in _AUTHZ_FIELDS:
+            raise ValueError(
+                f"{where_} 'where' reads authz.{field_name_}, which the prelude does not "
+                f"provide. Available: {', '.join(_AUTHZ_FIELDS)}.")
+        if field_name_ != "attrs":
+            continue
+        if not attr:
+            raise ValueError(
+                f"{where_} 'where' uses bare 'authz.attrs' — name the attribute, "
+                "e.g. authz.attrs.rankLevel")
+        if attr not in identity.caller_attributes:
+            declared = ", ".join(identity.caller_attributes) or "(none)"
+            raise ValueError(
+                f"{where_} 'where' reads caller attribute {attr!r}, which is not declared "
+                f"in security.identity.caller_attributes (declared: {declared}). An "
+                "undeclared attribute is NULL, so the rule would never fire — which "
+                "under-grants in a grant and fails OPEN in a denial.")
 
 
 def _parse_rules(f, raw, field_name: str, identity: IdentityConfig) -> list[Grant]:
@@ -281,6 +353,7 @@ def _parse_rules(f, raw, field_name: str, identity: IdentityConfig) -> list[Gran
                     f"{where_} 'where' references 'caller', which security.identity."
                     f"source={identity.source!r} does not provide in the data query. Express "
                     "the caller side in 'via', which the engine cuts at the boundary.")
+            _check_authz_refs(where_, cond, identity)
 
         out.append(Grant(label=label, via=via, where=cond,
                          reason=str(g.get("reason") or "")))
@@ -328,7 +401,16 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
         group_rels=[str(x) for x in (id_raw.get("group_rels") or defaults.group_rels)],
         group_name_keys=[str(x) for x in (id_raw.get("group_name_keys") or defaults.group_name_keys)],
         inline_group_list=str(id_raw.get("inline_group_list") or defaults.inline_group_list),
+        caller_attributes=[str(x) for x in (id_raw.get("caller_attributes") or [])],
     )
+    # Interpolated as map keys and property lookups in the prelude, so they must be
+    # plain identifiers — the same trust level as identity.labels.
+    for attr in identity.caller_attributes:
+        if not _IDENTIFIER.match(attr):
+            raise ValueError(
+                f"{f}: security.identity.caller_attributes contains invalid property "
+                f"name {attr!r} — it is interpolated into Cypher, so it must be a plain "
+                "identifier")
     # Relationship types are interpolated into the Cypher pattern (they cannot be
     # parameterised), so they must be safe identifiers.
     for rel in identity.group_rels:
@@ -438,11 +520,22 @@ def load_manifest(bundle_dir: Path) -> BundleManifest:
         if not label.replace("_", "").isalnum() or not prop.replace("_", "").isalnum():
             raise ValueError(f"{f}: security.resource_keys has invalid entry {label!r}: {prop!r}")
 
+    raw_ingested = sec_raw.get("ingested_rels") or {}
+    if not isinstance(raw_ingested, dict):
+        raise ValueError(
+            f"{f}: security.ingested_rels must be a mapping of relationship type -> the "
+            "feed that writes it")
+    ingested_rels = {str(k): str(v) for k, v in raw_ingested.items()}
+    for rel in ingested_rels:
+        if not rel.replace("_", "").isalnum():
+            raise ValueError(f"{f}: security.ingested_rels has invalid type {rel!r}")
+
     security = SecurityPolicy(
         mode=mode,
         grant_model=grant_model,
         grants=grants,
         denials=denials,
+        ingested_rels=ingested_rels,
         resource_keys=resource_keys,
         permissions_property=permissions_property,
         protected_labels=[str(x) for x in protected_labels],

@@ -169,12 +169,35 @@ uv run python scripts/entitlement_surface.py asset_platform
 
 An entitlement edge is not a kind of edge — `AUTHORED_BY` is a business fact until
 a grant traverses it. So the entitlement graph is the *projection* of the graph
-onto the types and properties named in `grants`, `denials` and `identity`. The
-report splits them into **policy** edges (exist only for entitlement), **dual-purpose**
-edges (business facts a rule traverses — the risky category, since a routine edit
-moves access) and **data-only** edges. It also flags a rule whose relationship type
-is absent from the graph: for a grant that under-grants, but **for a denial it
-fails open.**
+onto the types and properties named in `grants`, `denials` and `identity`.
+
+The split that decides how each edge can be **governed** is who writes it, which is
+a deployment fact rather than a rule fact — so it is declared once in
+`security.ingested_rels`. Anything absent from that map is **authored**, and a role
+can be denied write on it outright:
+
+```bash
+uv run python scripts/entitlement_surface.py asset_platform --write-guard business_feed
+```
+
+In `asset_platform` that is 4 edges out of 22. The other 18 are written by a feed,
+so a routine upstream edit moves access and the privilege cannot be taken away
+without breaking ingestion. **A parallel "entitlement-only" copy of them does not
+help** — it moves the same edit one step downstream and adds a staleness failure
+nothing in the query can detect. Mint a separate type when you need to revoke
+someone's ability to *write* it, not to tidy the diagram; full argument in
+[`docs/entitlement-edges.md`](docs/entitlement-edges.md).
+
+The report also flags a rule whose relationship type is absent from the graph — for
+a grant that under-grants, but **for a denial it fails open** — and separately flags
+every barrier resting on a feed-written edge.
+
+**Thresholds are not principals.** `rankLevel >= 5` is an ordering, and a set of
+names cannot express one without minting a principal per rank. Declare
+`identity.caller_attributes: [rankLevel]` and a rule reads
+`authz.attrs.rankLevel >= 5`, resolved once in the prelude. A scalar crosses a
+separated-identity boundary where the caller *node* cannot, so thresholds work
+unchanged under all three `identity.source` values.
 
 Declare `protected_labels` so [`scripts/validate_bundle.py`](scripts/validate_bundle.py)
 fails when a business record is missing its access-control list — otherwise such a
@@ -641,6 +664,11 @@ neo4j-mcp-gateway/
     try_tool.py       # fast dev loop: run one tool, no MCP/restart
     new_bundle.py     # scaffold a new bundle from bundles/_template
     validate_bundle.py# run every tool in a bundle against a live DB
+    check_entitlements.py       # conformance cases; --identity-source sweeps topology
+    entitlement_surface.py      # which edges decide access; --write-guard emits DENY DDL
+    ingest_business_hierarchy.py# project the HR view -> OrgUnit tree, IN_UNIT, REPORTS_TO
+    ingest_coverage_teams.py    # project the coverage view -> CoverageTeam, COVERS
+    load_asset_platform.sh      # the five load steps, in dependency order
   bundles/            # SWAPPABLE use cases (pick one with ACTIVE_BUNDLE)
     _template/        # skeleton copied by new_bundle.py
     ato/              # account-takeover bundle
@@ -651,7 +679,11 @@ neo4j-mcp-gateway/
       bundle.yaml     #   security.mode: mediated + protected_labels
       tools/*.yaml    #   curated mediated tools (match/scope/return)
       data/iam_demo.cypher
-      data/iam_demo.cypher
+    asset_platform/   # the reference entitlement model — 20 labels, 46 cases
+      bundle.yaml     #   grants, denials, caller_attributes, ingested_rels
+      tools/*.yaml    #   research, interactions, trade blotter, compensation
+      data/views/     #   sample business_hierarchy + coverage_teams extracts
+      data/*.cypher   #   business graph, authored policy, trades and compensation
   .vscode/mcp.json
   .env.example        # root creds/defaults (per-bundle .env overrides)
   pyproject.toml

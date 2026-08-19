@@ -1,0 +1,39 @@
+# Trades, filtered to what the caller may see. SIX grant routes and one denial
+# converge on this one tool, which is what makes it the hardest question in the
+# bundle: the booker, the booking desk (up to a notional), the reporting line
+# above the booker, the team covering the counterparty, supervision of the unit at
+# managing-director rank, and the supervisory access-control list — minus any
+# counterparty restricted for the caller's desk.
+#
+# NOTE the absence of an anchor. An anchored tool restricts what the match
+# examines, and the rule is that an anchor must reach EVERY route by which a
+# caller may be entitled. Six unrelated routes means no single pattern reaches
+# them all, so anchoring here would silently hide rows — the failure direction
+# nothing downstream can repair. This is exactly the tool the ANCHOR_SAFETY note
+# in gateway/mediation.py says not to anchor.
+#
+# The counterparty and the desk are reference data and stay out of `protect:`, so
+# the joins through them do not drop rows.
+name: trade_blotter
+description: >
+  Booked trades with counterparty, booking desk and asset. Filtered to the
+  caller's entitlements, so the blotter is theirs rather than the firm's — two
+  people on the same desk can legitimately see different trades.
+parameters:
+  - name: counterparty
+    type: string
+    description: Client organisation name. Empty string returns all the caller may see.
+    required: false
+    default: ""
+match: |
+  MATCH (t:Trade)-[:WITH_COUNTERPARTY]->(o:ClientOrg)
+  WHERE $counterparty = '' OR o.name = $counterparty
+  MATCH (t)-[:BOOKED_ON]->(dk:Desk)
+  MATCH (t)-[:ON_ASSET]->(a:Asset)
+scope: [t, o, dk, a]
+protect: [t]
+return: |
+  RETURN t.tradeId AS tradeId, t.side AS side, t.notional AS notional,
+         o.name AS counterparty, dk.name AS desk, a.ticker AS ticker
+  ORDER BY tradeId
+read_only: true

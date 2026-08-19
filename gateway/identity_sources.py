@@ -102,6 +102,10 @@ class IdentityResult:
     principal_labels: list[str] = field(default_factory=list)
     principal_properties: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # The declared caller attributes, projected out of principal_properties. A
+    # threshold rule reads these, so a remote source must produce them here — the
+    # in-graph preludes build the same map in Cypher (mediation.caller_attrs_map).
+    attrs: dict = field(default_factory=dict)
 
     def as_authz(self) -> dict:
         """The shape the composed query expects as its ``authz`` binding."""
@@ -109,6 +113,7 @@ class IdentityResult:
             "principalId": self.principal_id,
             "tenantId": self.tenant_id,
             "authzPrincipals": self.authz_principals,
+            "attrs": self.attrs,
         }
 
 
@@ -157,11 +162,16 @@ def _unique(values) -> list[str]:
 def _from_row(policy: SecurityPolicy, principal: str, row: dict | None) -> IdentityResult:
     """Shared shaping so every graph-backed source returns identical structure."""
     authz = [principal, policy.principal.everyone]
+    declared = policy.identity.caller_attributes
     if row is None:
         return IdentityResult(
             found=False,
             authz_principals=_unique(authz),
             principal_id=principal,
+            # Every declared attribute present and NULL, which is what the in-graph
+            # prelude produces for an unmatched caller. A threshold on NULL is NULL,
+            # so an unknown caller clears no bar — the same answer either way.
+            attrs={a: None for a in declared},
             notes=["No matching identity node was found; the caller holds only their own "
                    "identity and the everyone principal."],
         )
@@ -177,6 +187,7 @@ def _from_row(policy: SecurityPolicy, principal: str, row: dict | None) -> Ident
         groups=groups,
         principal_labels=row.get("principalLabels") or [],
         principal_properties=props,
+        attrs={a: props.get(a) for a in declared},
     )
 
 

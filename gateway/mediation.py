@@ -83,6 +83,7 @@ _PRELUDE = """CALL {
   RETURN {
     principalId: head([k IN $@@P_MATCH_KEYS@@ WHERE u[k] IS NOT NULL | u[k]]),
     tenantId: u.tenantId,
+    attrs: @@CALLER_ATTRS@@,
     authzPrincipals: [p IN groupPrincipals
         + coalesce(u[$@@P_INLINE_GROUPS@@], [])
         + [ head([k IN $@@P_MATCH_KEYS@@ WHERE u[k] IS NOT NULL | u[k]]), $@@P_EVERYONE@@ ]
@@ -118,6 +119,7 @@ _PRELUDE_COMPOSITE = """CALL {
   RETURN {
     principalId: head([k IN $@@P_MATCH_KEYS@@ WHERE u[k] IS NOT NULL | u[k]]),
     tenantId: u.tenantId,
+    attrs: @@CALLER_ATTRS@@,
     authzPrincipals: [p IN groupPrincipals
         + coalesce(u[$@@P_INLINE_GROUPS@@], [])
         + [ head([k IN $@@P_MATCH_KEYS@@ WHERE u[k] IS NOT NULL | u[k]]), $@@P_EVERYONE@@ ]
@@ -129,6 +131,46 @@ _PRELUDE_COMPOSITE = """CALL {
 # was sent, so the prelude is a parameter binding. The engine builds that map; it
 # is never accepted from a tool caller, because P_AUTHZ is a reserved parameter.
 _PRELUDE_REMOTE = """WITH $@@P_AUTHZ@@ AS authz"""
+
+
+# CALLER_ATTRIBUTES
+# -----------------
+# A set of principal names answers "is the caller one of these?". It cannot answer
+# "is the caller senior enough?", because an ordering is not a membership test.
+# Encoding a threshold as membership means one principal per rank, re-issued on
+# every promotion — the materialisation problem this engine exists to avoid.
+#
+# So the prelude also lifts a declared handful of the caller's own properties into
+# `authz.attrs`, and a rule compares them:
+#
+#     where: "authz.attrs.rankLevel >= 5"
+#
+# The map is built with LITERAL keys rather than `u[$param]` for two reasons. A
+# non-constant property key returns NULL across a composite `USE` boundary (see
+# COMPOSITE_PROPERTY_ACCESS), which would make every threshold silently false. And
+# core Cypher cannot construct a map from a parameterised key list at all. The
+# names are bundle config validated as identifiers at manifest load, so this is
+# the same trust level as the identity labels two lines below.
+#
+# THREE PROPERTIES WORTH NAMING, because they are why this beats a JOIN:
+#
+#   Read once, not per row. The attributes are resolved in the prelude, so a
+#   threshold on a million rows costs one property read.
+#
+#   Crosses the boundary as a VALUE. Unlike the caller NODE — which a composite
+#   database refuses to export — a scalar travels. Every rank threshold works
+#   unchanged under `source: composite` and `source: remote`.
+#
+#   NULL fails closed in a grant, OPEN in a denial. `NULL >= 5` is NULL, so a
+#   missing attribute withholds a grant (visible: somebody's rows disappear) and
+#   withdraws a barrier (invisible: nothing is missing from anyone). Hence the
+#   load-time check on declared names, and hence the conformance invariant that
+#   every caller actually carries every deciding attribute.
+def caller_attrs_map(policy: SecurityPolicy) -> str:
+    attrs = policy.identity.caller_attributes
+    if not attrs:
+        return "{}"
+    return "{" + ", ".join(f"{a}: u.{a}" for a in attrs) + "}"
 
 
 def prelude_for(policy: SecurityPolicy) -> str:
@@ -398,8 +440,23 @@ def rule_test(policy: SecurityPolicy, rule, var: str) -> str:
     the data-side half, re-rooted at a proxy — see GRANT_SPLITTING. Same
     semantics either way; only the starting point moves from the caller NODE to a
     caller-derived VALUE.
+
+    THE AUTHOR'S PREDICATE IS ALWAYS PARENTHESISED, and this is a security fix
+    rather than tidiness. `AND` binds tighter than `OR` in Cypher, so composing an
+    unbracketed predicate that contains a top-level `OR`:
+
+        WHERE <cut predicate> AND resource.notional <= 50000000
+                              OR authz.attrs.rankLevel >= 5
+
+    parses as `(<cut> AND notional) OR rank`, and for a caller who clears the rank
+    bar the whole subquery collapses to `true` — DISCARDING the predicate that ties
+    the pattern to this caller. That is a disclosure, not a wrong count: it was
+    found by running the conformance suite under `identity.source: remote`, where a
+    managing director in an unrelated business unit was handed every trade in the
+    firm. `where: "a OR b"` is a completely reasonable thing to author, so the
+    engine brackets it rather than asking authors to.
     """
-    cond = _bind(rule.where, var) if rule.where else ""
+    cond = f"({_bind(rule.where, var)})" if rule.where else ""
     if not rule.via:
         # No traversal: the rule is a statement about the row itself.
         return f"({cond})"
@@ -617,6 +674,7 @@ def _subst(template: str, policy: SecurityPolicy) -> str:
         .replace("@@IDENTITY_GRAPH@@", policy.identity.identity_graph)
         .replace("@@DATA_GRAPH@@", policy.identity.data_graph)
         .replace("@@GROUP_RELS@@", "|".join(policy.identity.group_rels))
+        .replace("@@CALLER_ATTRS@@", caller_attrs_map(policy))
         # A label expression rather than an unlabelled MATCH: the latter forces an
         # AllNodesScan that grows with the whole graph (measured: 405,430 db hits
         # per call against 4,541). See DYNAMIC_TYPES above on why not `$any($p)`.

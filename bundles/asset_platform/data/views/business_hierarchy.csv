@@ -1,0 +1,18 @@
+employee_id,work_email,full_name,job_title,rank_level,unit_id,unit_name,unit_kind,parent_unit_id,manager_employee_id
+E-1001,ella.moreau@bank.com,Ella Moreau,Vice President,3,DESK-EQR-EMEA,Equity Research EMEA,desk,BU-RESEARCH,E-1007
+E-1002,raj.patel@bank.com,Raj Patel,Associate,2,DESK-EQR-EMEA,Equity Research EMEA,desk,BU-RESEARCH,E-1001
+E-1003,oscar.lindgren@bank.com,Oscar Lindgren,Executive Director,4,DESK-IS-EMEA,Institutional Sales EMEA,desk,BU-ICS,E-1008
+E-1004,sam.okoye@bank.com,Sam Okoye,Associate,2,DESK-IS-EMEA,Institutional Sales EMEA,desk,BU-ICS,E-1003
+E-1005,yuki.tanaka@bank.com,Yuki Tanaka,Vice President,3,DESK-IS-APAC,Institutional Sales APAC,desk,BU-ICS,E-1008
+E-1006,dana.whitfield@bank.com,Dana Whitfield,Executive Director,4,DESK-CR,Control Room,desk,BU-COMPLIANCE,
+E-1007,priya.raman@bank.com,Priya Raman,Managing Director,5,BU-RESEARCH,Global Research,business-unit,DIV-SEC,
+E-1008,hana.kim@bank.com,Hana Kim,Managing Director,5,BU-ICS,Institutional Client,business-unit,DIV-SEC,
+E-1009,nina.holt@bank.com,Nina Holt,Associate,2,DESK-IS-EMEA,Institutional Sales EMEA,desk,BU-ICS,E-1003
+E-1010,noor.haddad@bank.com,Noor Haddad,Managing Director,5,BU-MARKETS,Global Markets,business-unit,DIV-SEC,
+E-1011,tomas.vogel@bank.com,Tomas Vogel,Executive Director,4,DESK-EQD-EMEA,Equity Derivatives EMEA,desk,BU-MARKETS,E-1010
+E-1012,felipe.souza@bank.com,Felipe Souza,Associate,2,DESK-EQD-EMEA,Equity Derivatives EMEA,desk,BU-MARKETS,E-1011
+E-1013,omar.faruq@bank.com,Omar Faruq,Associate,2,DESK-EQD-EMEA,Equity Derivatives EMEA,desk,BU-MARKETS,E-1011
+E-1014,ingrid.svensson@bank.com,Ingrid Svensson,Vice President,3,DESK-RATES-EMEA,Rates EMEA,desk,BU-MARKETS,E-1010
+,,,,,BU-COMPLIANCE,Compliance,business-unit,DIV-LC,
+,,,,,DIV-SEC,Securities,division,,
+,,,,,DIV-LC,Legal & Compliance,division,,

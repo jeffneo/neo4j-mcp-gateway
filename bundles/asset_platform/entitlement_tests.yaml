@@ -199,7 +199,183 @@ cases:
     must_see: [3]
 
   # ---------------------------------------------------------------------------
-  # 8. INVARIANTS — questions about the model, not about a caller.
+  # 8. TRADE DATA — SIX ROUTES AND A BARRIER, ISOLATED ONE AT A TIME
+  #
+  # Communications entitlement is mostly one route per record. A trade is
+  # reachable half a dozen unrelated ways at once, so the risk is not that a route
+  # is missing — it is that one route quietly WIDENS another. Each case below is
+  # chosen so that exactly one mechanism explains the difference between it and
+  # its neighbour.
+  # ---------------------------------------------------------------------------
+
+  # Tomas booked TRD-1 and TRD-3; TRD-2 is Felipe's, at 80m, above the desk
+  # notional limit. Tomas is an executive director, so the desk route does NOT
+  # reach it and the ONLY route left is the reporting line. If REPORTS_TO breaks,
+  # this is the case that fails and nothing else does.
+  - name: the reporting line reaches a trade the notional limit puts out of reach
+    principal: tomas.vogel@bank.com
+    tool: trade_blotter
+    id_field: tradeId
+    must_see: [TRD-1, TRD-2]
+    must_not_see: [TRD-3, TRD-4, TRD-5]
+    expect_count: 2
+
+  # The same desk, one rank lower, nobody reporting to him. Omar's single row is
+  # bounded by FOUR separate mechanisms at once, which is why this is the densest
+  # case in the file:
+  #   TRD-1  desk route, inside the notional limit          -> visible
+  #   TRD-2  desk route, ABOVE the limit, and he is not MD  -> withheld
+  #   TRD-3  desk route grants it, the restriction withdraws it
+  #   TRD-4  a different desk in the same business unit     -> withheld
+  #   TRD-5  ditto
+  - name: the desk route stops at the notional limit, the restriction, and the desk
+    principal: omar.faruq@bank.com
+    tool: trade_blotter
+    id_field: tradeId
+    must_see: [TRD-1]
+    must_not_see: [TRD-2, TRD-3, TRD-4, TRD-5]
+    expect_count: 1
+
+  # A managing director over the business unit reaches both desks beneath it, and
+  # the notional limit does not apply because rank clears it.
+  - name: supervision at managing-director rank reaches both desks in the unit
+    principal: noor.haddad@bank.com
+    tool: trade_blotter
+    id_field: tradeId
+    must_see: [TRD-1, TRD-2, TRD-3, TRD-4, TRD-5]
+    expect_count: 5
+
+  # THE OTHER HALF OF THAT RULE, and the more important half. Priya is also a
+  # managing director. She is in a different business unit, and she sees nothing.
+  # Rank is a condition ON a path, never a substitute for one — this is the case
+  # that proves the subtree bound is doing work.
+  - name: managing-director rank alone grants no trade outside the caller's unit
+    principal: priya.raman@bank.com
+    tool: trade_blotter
+    id_field: tradeId
+    must_not_see: [TRD-1, TRD-2, TRD-3, TRD-4, TRD-5]
+    expect_count: 0
+
+  # Coverage in isolation. Oscar did not book these, is not on the booking desk,
+  # has nobody in his line who booked them, and is not a managing director. The
+  # only route is his team's current coverage of the two counterparties.
+  - name: counterparty coverage alone reaches a trade on an unrelated desk
+    principal: oscar.lindgren@bank.com
+    tool: trade_blotter
+    id_field: tradeId
+    must_see: [TRD-2, TRD-5]
+    must_not_see: [TRD-1, TRD-3, TRD-4]
+    expect_count: 2
+
+  # COVERAGE PARITY IS STRUCTURAL, and this is the case that says so. Oscar is an
+  # executive director and Nina is an associate; they are on one coverage team and
+  # their blotters must be IDENTICAL. They are, because both traverse the same
+  # (:CoverageTeam) node rather than relying on two rows agreeing. Flatten the team
+  # into a per-person edge and a partial refresh breaks this silently.
+  - name: two members of one coverage team see an identical blotter regardless of rank
+    same_for:
+      - oscar.lindgren@bank.com
+      - nina.holt@bank.com
+    tool: trade_blotter
+    id_field: tradeId
+
+  # Two mechanisms in one caller, both of them withholding. Sam's team covers
+  # Rivermark, so TRD-3 is genuinely granted and the desk restriction withdraws it.
+  # His team's coverage of Kestrel EXPIRED in 2025, so TRD-2 was never granted.
+  # Same empty result, two entirely different reasons — which explain-access
+  # distinguishes and a row count cannot.
+  - name: an expired coverage window and a desk restriction leave an empty blotter
+    principal: sam.okoye@bank.com
+    tool: trade_blotter
+    id_field: tradeId
+    must_not_see: [TRD-2, TRD-3]
+    expect_count: 0
+
+  # The access-control list still works alongside all six path routes. Supervisory
+  # review holds no path to any trade — not the desk, not the line, not coverage,
+  # not rank — and reads every one of them by list entry. `grant_model: both` is
+  # the steady state, not a migration step.
+  - name: the supervisory access-control list reaches trades no path route would
+    principal: dana.whitfield@bank.com
+    tool: trade_blotter
+    id_field: tradeId
+    must_see: [TRD-1, TRD-2, TRD-3, TRD-4, TRD-5]
+    expect_count: 5
+
+  # ---------------------------------------------------------------------------
+  # 9. COMPENSATION — A THRESHOLD ON THE CALLER, NOT A PRINCIPAL
+  #
+  # The canonical example: everyone sees their own, a manager sees their reports',
+  # and only a managing director sees the unit's. Today that is a JOIN between a
+  # compensation table and an HR view, hand-written per application.
+  #
+  # Compensation carries NO access-control list, so every case here is decided by
+  # path grants alone.
+  # ---------------------------------------------------------------------------
+
+  - name: an associate sees only their own compensation
+    principal: felipe.souza@bank.com
+    tool: compensation
+    id_field: compId
+    must_see: [COMP-E-1012]
+    expect_count: 1
+
+  # THE CASE THE WHOLE FEATURE EXISTS FOR. Raj reports to Ella, so the path from
+  # Ella to Raj's record EXISTS and matches the rule's pattern. She is a vice
+  # president, and the rule requires executive director. She sees only her own.
+  #
+  # Promote her — one property, no schema change, no principal minted — and
+  # COMP-E-1002 appears. That is what a set of principal names cannot express: an
+  # ordering. Encoding it as membership means a principal per rank, re-issued on
+  # every promotion.
+  - name: a rank threshold withholds a compensation path that genuinely exists
+    principal: ella.moreau@bank.com
+    tool: compensation
+    id_field: compId
+    must_see: [COMP-E-1001]         # her own
+    must_not_see: [COMP-E-1002]     # her direct report's — the path exists, the rank does not
+    expect_count: 1
+
+  # One rank higher, the same shape of path, and the reports appear.
+  - name: an executive director reads their reporting line's compensation
+    principal: oscar.lindgren@bank.com
+    tool: compensation
+    id_field: compId
+    must_see: [COMP-E-1003, COMP-E-1004, COMP-E-1009]
+    must_not_see: [COMP-E-1008]     # their own manager's
+    expect_count: 3
+
+  - name: a managing director reads compensation across the unit they supervise
+    principal: noor.haddad@bank.com
+    tool: compensation
+    id_field: compId
+    must_see: [COMP-E-1010, COMP-E-1011, COMP-E-1012, COMP-E-1013, COMP-E-1014]
+    expect_count: 5
+
+  # The unit route is bounded by the SUBTREE, not by rank. Priya is a managing
+  # director over research and reads research; the markets unit is invisible to
+  # her. Same rule, same rank, different subtree.
+  - name: a managing director's compensation view stops at their own unit
+    principal: priya.raman@bank.com
+    tool: compensation
+    id_field: compId
+    must_see: [COMP-E-1007, COMP-E-1001, COMP-E-1002]
+    must_not_see: [COMP-E-1010, COMP-E-1011]
+    expect_count: 3
+
+  # Supervisory review reads every document, interaction and trade in the firm by
+  # access-control list, and exactly one compensation record: their own. The list
+  # model and the path model govern different labels here, deliberately.
+  - name: the supervisory list does not reach compensation
+    principal: dana.whitfield@bank.com
+    tool: compensation
+    id_field: compId
+    must_see: [COMP-E-1006]
+    must_not_see: [COMP-E-1001, COMP-E-1010]
+    expect_count: 1
+
+  # ---------------------------------------------------------------------------
+  # 10. INVARIANTS — questions about the model, not about a caller.
   #
   # These run unmediated over the whole graph. No tool exposes them and the
   # gateway never runs them; they belong in CI and in a control-room review.
@@ -248,4 +424,146 @@ cases:
       WHERE r.kind <> 'control'
         AND NOT EXISTS { MATCH (r)-[:SCOPED_TO]->(:Sector) }
       RETURN r.name AS unscopedRole ORDER BY unscopedRole
-    expect_count: 1
+    # sales-emea and markets-trading. Both work through coverage, the desk and the
+    # reporting line rather than through a sector scope, so this records the
+    # expected count rather than asserting zero — and any NEW unscoped role breaks
+    # the build until somebody says which of the two it is.
+    expect_count: 2
+
+  # ---------------------------------------------------------------------------
+  # INVARIANTS OVER THE INGESTED VIEWS
+  #
+  # These are the ones worth having. The projections in scripts/ingest_*.py
+  # validate their INPUT; these validate the graph the input produced, which is
+  # the only thing the rules actually read. Every one of them describes a state in
+  # which a rule silently under-grants — nobody's query errors, somebody's rows
+  # just stop appearing.
+  # ---------------------------------------------------------------------------
+
+  # An employee whose unit does not reach a division is cut off from the tree, and
+  # every rule that walks up it stops short. The failure is invisible from the
+  # caller's side: they see fewer trades, not an error. Bounded at 3 because that
+  # is the depth of this hierarchy.
+  - name: "invariant: every employee's unit reaches a division"
+    invariant: |
+      MATCH (e:Employee)-[:IN_UNIT]->(u:OrgUnit)
+      WHERE NOT EXISTS { MATCH (u)-[:PART_OF*0..3]->(:Division) }
+      RETURN e.email AS strandedEmployee, u.unitId AS unit
+    expect_count: 0
+
+  # No employee outside the tree entirely. IN_UNIT is projected from the HR view,
+  # so a missing row here is a truncated extract.
+  - name: "invariant: every employee sits in exactly one unit"
+    invariant: |
+      MATCH (e:Employee)
+      WITH e, count { (e)-[:IN_UNIT]->(:OrgUnit) } AS units
+      WHERE units <> 1
+      RETURN e.email AS employee, units
+    expect_count: 0
+
+  # EVERY DECIDING CALLER ATTRIBUTE MUST BE PRESENT. `authz.attrs.rankLevel` is
+  # NULL for an employee without the property, and `NULL >= 5` is NULL — so the
+  # threshold rules simply never fire for them. In a grant that under-grants and
+  # somebody notices; had a DENIAL depended on it, the barrier would have stopped
+  # applying and nobody would have. This is the check that makes a caller
+  # attribute safe to depend on.
+  - name: "invariant: every employee carries every deciding caller attribute"
+    invariant: |
+      MATCH (e:Employee)
+      WHERE e.rankLevel IS NULL OR NOT e.rankLevel IN [1, 2, 3, 4, 5]
+      RETURN e.email AS employee, e.rankLevel AS rankLevel
+    expect_count: 0
+
+  # A REPORTS_TO cycle makes `<-[:REPORTS_TO*1..4]-` reach everyone in the cycle
+  # from everyone else in it — the one failure here that OVER-grants, and the
+  # reason the walk is bounded at all. A relational view can hold a cycle without
+  # complaint; a graph can be asked.
+  - name: "invariant: the reporting line has no cycles"
+    invariant: |
+      MATCH (e:Employee)-[:REPORTS_TO*1..6]->(e)
+      RETURN DISTINCT e.email AS employeeInCycle
+    expect_count: 0
+
+  # The unit tree must be a tree. Two parents means a variable-length walk up it
+  # reaches two subtrees, so a supervision rule grants across a boundary it was
+  # scoped to respect. Matrix reporting is a real thing and this is where it would
+  # show up — as a decision to make rather than a surprise.
+  - name: "invariant: every unit below a division has exactly one parent"
+    invariant: |
+      MATCH (u:OrgUnit) WHERE NOT u:Division
+      WITH u, count { (u)-[:PART_OF]->(:OrgUnit) } AS parents
+      WHERE parents <> 1
+      RETURN u.unitId AS unit, parents
+    expect_count: 0
+
+  # A coverage team with no members entitles nobody; one with no accounts reaches
+  # nothing. Either is a silent under-grant, and either is what a partial refresh
+  # of the coverage view leaves behind.
+  - name: "invariant: every coverage team has members and covered accounts"
+    invariant: |
+      MATCH (t:CoverageTeam)
+      WITH t, count { (:Employee)-[:MEMBER_OF]->(t) } AS members,
+              count { (t)-[:COVERS]->(:ClientOrg) } AS accounts
+      WHERE members = 0 OR accounts = 0
+      RETURN t.teamId AS team, members, accounts
+    expect_count: 0
+
+  # Every COVERS edge must carry a window. A missing validFrom makes the predicate
+  # NULL, which withholds the grant — the same shape of silent under-grant as a
+  # missing rankLevel, arriving from the other feed.
+  - name: "invariant: every coverage edge carries a validity window"
+    invariant: |
+      MATCH (:CoverageTeam)-[cv:COVERS]->(:ClientOrg)
+      WHERE cv.validFrom IS NULL
+      RETURN cv.validFrom AS validFrom, cv.validTo AS validTo
+    expect_count: 0
+
+  # A trade must reach all three things its rules traverse. A trade missing its
+  # booking desk is readable only by its booker and by supervision's list — it
+  # disappears from the desk's own blotter, which is the kind of gap that surfaces
+  # weeks later as a reconciliation break rather than an access complaint.
+  - name: "invariant: every trade has a booker, a booking desk and a counterparty"
+    invariant: |
+      MATCH (t:Trade)
+      WHERE NOT EXISTS { MATCH (t)-[:BOOKED_BY]->(:Employee) }
+         OR NOT EXISTS { MATCH (t)-[:BOOKED_ON]->(:Desk) }
+         OR NOT EXISTS { MATCH (t)-[:WITH_COUNTERPARTY]->(:ClientOrg) }
+      RETURN t.tradeId AS incompleteTrade
+    expect_count: 0
+
+  # THE FAIL-OPEN GUARD, and the only kind of test that can catch it.
+  #
+  # `scripts/entitlement_surface.py` reports three barriers here resting on edges
+  # an upstream feed writes: IN_UNIT, WITH_ORG and WITH_COUNTERPARTY. If any of
+  # them goes missing the denial silently stops applying — and no per-caller case
+  # notices, because nothing is ABSENT from anyone's results. Somebody just sees
+  # more. So the barrier edges are asserted directly, by presence.
+  - name: "invariant: the declared information barriers are all in place"
+    invariant: |
+      UNWIND [{org:'Rivermark Industries', desk:'Institutional Sales EMEA'},
+              {org:'Rivermark Industries', desk:'Equity Derivatives EMEA'}] AS b
+      WITH b WHERE NOT EXISTS {
+        MATCH (:ClientOrg {name: b.org})-[:RESTRICTED_FOR]->(:Desk {name: b.desk}) }
+      RETURN b.org AS restrictedOrg, b.desk AS desk
+    expect_count: 0
+
+  # An interaction with no organisation is outside the reach of both the coverage
+  # grant AND the desk restriction. The grant half under-grants visibly; the denial
+  # half fails open. Same missing edge, two opposite consequences.
+  - name: "invariant: every interaction names the organisation it was with"
+    invariant: |
+      MATCH (i:Interaction)
+      WHERE NOT EXISTS { MATCH (i)-[:WITH_ORG]->(:ClientOrg) }
+      RETURN i.interactionId AS interactionWithoutOrg
+    expect_count: 0
+
+  # Every employee has exactly one compensation record. Two would double-count in
+  # any aggregate the tool computes AFTER filtering; none makes a person invisible
+  # to their own query, which reads as a permissions bug and is not one.
+  - name: "invariant: every employee has exactly one compensation record"
+    invariant: |
+      MATCH (e:Employee)
+      WITH e, count { (:Compensation)-[:COMPENSATION_OF]->(e) } AS records
+      WHERE records <> 1
+      RETURN e.email AS employee, records
+    expect_count: 0

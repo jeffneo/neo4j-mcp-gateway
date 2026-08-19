@@ -9,6 +9,9 @@
 #      that must apply to one and not the other.
 #   3. A DATED ENTITLEMENT — the scope has a validity window, evaluated at query
 #      time rather than materialised.
+#   4. A THRESHOLD ON THE CALLER — "managing director or above" is an ordering,
+#      not a set membership, so it needs an attribute rather than a principal.
+#   5. TRADE DATA REACHED BY SIX ROUTES AT ONCE, with a seventh withdrawing it.
 name: neo4j-asset-platform-gateway
 description: Asset research platform — sector-scoped entitlements across internal and client callers.
 
@@ -16,17 +19,21 @@ instructions: >
   This gateway serves an INSTITUTIONAL ASSET PLATFORM. Research documents, client
   interactions and corporate-access meetings are all ABOUT assets, and assets are
   classified under a single sector taxonomy (Sector -> Industry -> SubIndustry,
-  with assets attached at the SubIndustry leaf). Entities: Asset, Document,
-  Interaction, Meeting, AssetClass, Issuer, Sector, Industry, SubIndustry,
-  ClientOrg, plus Employee, ClientUser, Role, ClientRole, Desk, BusinessUnit,
-  Division and Region on the identity side.
+  with assets attached at the SubIndustry leaf). It also books TRADES against
+  client counterparties and holds employee COMPENSATION records. Entities: Asset,
+  Document, Interaction, Meeting, Trade, Compensation, AssetClass, Issuer, Sector,
+  Industry, SubIndustry, ClientOrg, plus Employee, ClientUser, Role, ClientRole,
+  OrgUnit (also labelled Desk, BusinessUnit or Division), CoverageTeam and Region
+  on the identity side.
   There are TWO kinds of caller. An internal Employee reaches content through the
-  sectors their role is scoped to, the client organisations they cover, and what
-  they authored or attended. An external ClientUser reaches only their own
-  organisation's content and the meetings they signed up for. Never assume a rule
-  that applies to one applies to the other.
-  Assets, documents, interactions and meetings are permissioned; the taxonomy,
-  asset classes, issuers and client organisations are reference data.
+  sectors their role is scoped to, the accounts their coverage team covers, their
+  place in the org hierarchy, their seniority, and what they authored or attended.
+  An external ClientUser reaches only their own organisation's content and the
+  meetings they signed up for. Never assume a rule that applies to one applies to
+  the other.
+  Documents, interactions, meetings, trades and compensation records are
+  permissioned; the taxonomy, asset classes, issuers, assets, client
+  organisations and the org hierarchy are reference data.
   WORKFLOW: call resolve-identity first to establish who you are acting as, then
   use the curated usecase_ tools. Results are already filtered to the caller's
   entitlements, so never describe a result as the complete picture. Use
@@ -39,16 +46,29 @@ instructions: >
 security:
   mode: mediated
   permissions_property: "Permissions.Read"
-  protected_labels: [Document, Interaction, Meeting]
+  # Labels EXPECTED to carry an access-control list, checked fail-closed by
+  # scripts/validate_bundle.py. Compensation is deliberately absent: it is
+  # governed by path grants alone, which is what makes it the case that proves
+  # the path model standing on its own.
+  protected_labels: [Document, Interaction, Meeting, Trade]
 
   identity:
     # Two caller classes resolved by the same prelude.
     labels: [Employee, ClientUser]
     match_keys: [email]
     # A principal here is a ROLE name, not a group name. Nothing in the engine
-    # assumes the relationship is called MEMBER_OF — it is config.
+    # assumes the relationship is called MEMBER_OF — it is config. Note that
+    # MEMBER_OF -> CoverageTeam is deliberately NOT here: coverage is a route to
+    # be traversed, not a principal to be held.
     group_rels: [HAS_ROLE, HAS_CLIENT_ROLE]
     group_name_keys: [name]
+    # Properties of the caller lifted into `authz.attrs` by the prelude, so a rule
+    # can compare them. This exists because a set of principal names cannot
+    # express an ORDERING: "managing director or above" is `rankLevel >= 5`, and
+    # encoding it as membership means a principal per rank, re-issued on every
+    # promotion. Read once per query, and they cross a separated-identity boundary
+    # as values — unlike the caller node, which does not cross it at all.
+    caller_attributes: [rankLevel]
 
   # 'both' because the two routes differ in kind and neither subsumes the other.
   # Role and author entitlements are naturally list entries; sector scope,
@@ -65,13 +85,23 @@ security:
       where: "sc.validFrom <= date() AND sc.validTo >= date()"
       reason: "role is scoped to the sector this document's asset classifies under"
 
-    # --- 2. COVERAGE -------------------------------------------------------
+    # --- 2. COVERAGE, MEDIATED BY A TEAM -----------------------------------
+    # The route is the caller's TEAM, not the caller: coverage is a fact about a
+    # team and an account, projected from the coverage_teams view. Two people on
+    # one team therefore see the same book because they traverse the same node,
+    # not because two rows happened to agree — parity is structural, and a
+    # conformance case asserts it between a rank-4 and a rank-2.
+    #
+    # The window is on COVERS because coverage of an account is what expires;
+    # membership is current or absent. validTo NULL means open-ended.
     - label: Interaction
-      via: "(caller)-[:COVERS]->(:ClientOrg)<-[:WITH_ORG]-(resource)"
-      reason: "covers the client organisation this interaction was with"
+      via: "(caller)-[:MEMBER_OF]->(:CoverageTeam)-[cv:COVERS]->(:ClientOrg)<-[:WITH_ORG]-(resource)"
+      where: "cv.validFrom <= date() AND (cv.validTo IS NULL OR cv.validTo >= date())"
+      reason: "is on a team currently covering the client organisation this interaction was with"
     - label: Document
-      via: "(caller)-[:COVERS]->(:ClientOrg)<-[:DISTRIBUTED_TO]-(resource)"
-      reason: "covers a client organisation this document was distributed to"
+      via: "(caller)-[:MEMBER_OF]->(:CoverageTeam)-[cv:COVERS]->(:ClientOrg)<-[:DISTRIBUTED_TO]-(resource)"
+      where: "cv.validFrom <= date() AND (cv.validTo IS NULL OR cv.validTo >= date())"
+      reason: "is on a team currently covering an organisation this document was distributed to"
 
     # --- 3. PERSONAL INVOLVEMENT -------------------------------------------
     - label: Document
@@ -91,24 +121,136 @@ security:
       via: "(caller:ClientUser)-[:SIGNED_UP_FOR]->(resource)"
       reason: "signed up for this meeting"
 
+    # --- 5. TRADES ---------------------------------------------------------
+    # Six routes reach a trade and a seventh withdraws it. Communications
+    # entitlement is mostly one route per record; trade entitlement is many at
+    # once, and they must OR together without any of them widening the others.
+    - label: Trade
+      via: "(caller)<-[:BOOKED_BY]-(resource)"
+      reason: "booked this trade"
+
+    # The desk route, LIMITED BY NOTIONAL. Everyone on the booking desk sees the
+    # desk's flow up to a size; above it, only managing directors. This is the
+    # shape a list model cannot express at all — the answer depends on a number on
+    # the row compared against an attribute of the caller, and neither is a name.
+    - label: Trade
+      via: "(caller)-[:IN_UNIT]->(:Desk)<-[:BOOKED_ON]-(resource)"
+      where: "resource.notional <= 50000000 OR authz.attrs.rankLevel >= 5"
+      reason: "sits on the desk this trade was booked on, within the desk notional limit"
+
+    # The management line: anyone reporting up to the caller, to any depth. Bounded
+    # at 4 because that is the depth of this hierarchy — an unbounded walk up a
+    # reporting tree is how a rule like this starts granting the whole firm.
+    - label: Trade
+      via: "(caller)<-[:REPORTS_TO*1..4]-(:Employee)<-[:BOOKED_BY]-(resource)"
+      reason: "this trade was booked by someone in the caller's reporting line"
+
+    - label: Trade
+      via: "(caller)-[:MEMBER_OF]->(:CoverageTeam)-[cv:COVERS]->(:ClientOrg)<-[:WITH_COUNTERPARTY]-(resource)"
+      where: "cv.validFrom <= date() AND (cv.validTo IS NULL OR cv.validTo >= date())"
+      reason: "is on a team currently covering the counterparty to this trade"
+
+    # SUPERVISION BY RANK, scoped by subtree. Both halves are load-bearing and each
+    # is isolated by a case: a managing director in a DIFFERENT business unit sees
+    # nothing, and a non-MD in the right unit sees nothing. *0..3 includes the
+    # caller's own unit, so a desk head is covered by the same rule.
+    - label: Trade
+      via: "(caller)-[:IN_UNIT]->(:OrgUnit)<-[:PART_OF*0..3]-(:OrgUnit)<-[:BOOKED_ON]-(resource)"
+      where: "authz.attrs.rankLevel >= 5"
+      reason: "supervises the unit this trade's booking desk belongs to, at managing-director rank"
+
+    # --- 6. COMPENSATION ---------------------------------------------------
+    # The canonical example, and the one that is a hand-written JOIN in every
+    # application that needs it today. Three rules, two thresholds, no new edges:
+    # every relationship traversed here already existed for another reason.
+    - label: Compensation
+      via: "(caller)<-[:COMPENSATION_OF]-(resource)"
+      reason: "own compensation record"
+
+    # A manager reads their reports' compensation — but only from executive
+    # director. The path and the threshold are INDEPENDENT: a vice president with
+    # direct reports has the path and fails the bar, which is the case that proves
+    # the threshold is doing work rather than decorating a rule.
+    - label: Compensation
+      via: "(caller)<-[:REPORTS_TO*1..4]-(:Employee)<-[:COMPENSATION_OF]-(resource)"
+      where: "authz.attrs.rankLevel >= 4"
+      reason: "manages the person this compensation record belongs to, at executive-director rank"
+
+    - label: Compensation
+      via: "(caller)-[:IN_UNIT]->(:OrgUnit)<-[:PART_OF*0..3]-(:OrgUnit)<-[:IN_UNIT]-(:Employee)<-[:COMPENSATION_OF]-(resource)"
+      where: "authz.attrs.rankLevel >= 5"
+      reason: "reads compensation across the unit they supervise, at managing-director rank"
+
   # Rules that WITHDRAW access someone otherwise holds.
   denials:
     # A barrier: the client organisation is restricted for the caller's desk.
-    # Sam covers Rivermark, so his grant is real and this overrides it.
+    # Sam's team covers Rivermark, so his grant is real and this overrides it.
+    #
+    # IN_UNIT here comes from the business_hierarchy view, which makes this the
+    # riskiest edge in the bundle: it is a business fact that a BARRIER depends on,
+    # so a wrong desk in an HR extract silently lifts an information barrier. The
+    # barrier edge itself (RESTRICTED_FOR) is authored and never ingested.
     - label: Interaction
-      via: "(caller)-[:WORKS_FOR]->(:Desk)<-[:RESTRICTED_FOR]-(:ClientOrg)<-[:WITH_ORG]-(resource)"
+      via: "(caller)-[:IN_UNIT]->(:Desk)<-[:RESTRICTED_FOR]-(:ClientOrg)<-[:WITH_ORG]-(resource)"
       reason: "the client organisation is restricted for this caller's desk"
+    - label: Trade
+      via: "(caller)-[:IN_UNIT]->(:Desk)<-[:RESTRICTED_FOR]-(:ClientOrg)<-[:WITH_COUNTERPARTY]-(resource)"
+      reason: "the counterparty is restricted for this caller's desk"
     # An embargo: a condition on the row, no traversal at all. NULL does not
     # deny, so a document with no `embargoed` property is unaffected.
     - label: Document
       where: "resource.embargoed = true"
       reason: "the document is under pre-publication embargo"
 
+  # WHO WRITES EACH DECIDING EDGE. The one fact about the entitlement surface that
+  # cannot be derived from these rules, and the one that decides how each edge can
+  # be governed. Anything NOT listed here is authored — no automated writer, so a
+  # database role can be denied write on it outright. Anything listed here is
+  # written by a feed, which means:
+  #
+  #   * a routine upstream edit moves access, and no parallel "entitlement-only"
+  #     relationship changes that — a derived copy just moves the same edit one
+  #     step downstream and adds a staleness failure of its own;
+  #   * the privilege cannot be taken away without breaking ingestion;
+  #   * so the controls are this list, conformance in CI after every load, and
+  #     above all not letting a BARRIER depend on one.
+  #
+  #     scripts/entitlement_surface.py --write-guard <role>
+  ingested_rels:
+    # the business_hierarchy view
+    IN_UNIT: business_hierarchy
+    PART_OF: business_hierarchy
+    REPORTS_TO: business_hierarchy
+    # the coverage_teams view
+    MEMBER_OF: coverage_teams
+    COVERS: coverage_teams
+    # the platform's own record feed, including the property-to-relationship seams
+    AUTHORED_BY: platform_records
+    DISTRIBUTED_TO: platform_records
+    PARTICIPATED_IN: platform_records
+    SIGNED_UP_FOR: platform_records
+    WAS_ABOUT: platform_records
+    WITH_ORG: platform_records
+    CLASSIFIED_AS: platform_records
+    NARROWER_THAN: platform_records
+    BOOKED_BY: platform_records
+    BOOKED_ON: platform_records
+    WITH_COUNTERPARTY: platform_records
+    COMPENSATION_OF: platform_records
+    WORKS_FOR: platform_records
+    # NOT listed, therefore authored and lockable: SCOPED_TO, RESTRICTED_FOR,
+    # HAS_ROLE, HAS_CLIENT_ROLE. Four edges out of twenty-two, which is the honest
+    # measure of how much of an entitlement model can be put behind a write
+    # privilege — and the reason the answer to feed-written edges has to be
+    # testing rather than permissions.
+
   resource_keys:
     Asset: ticker
     Document: docId
     Interaction: interactionId
     Meeting: meetingId
+    Trade: tradeId
+    Compensation: compId
 
 downstream:
   read_only: true

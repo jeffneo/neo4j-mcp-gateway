@@ -179,13 +179,85 @@ steady state rather than a migration step.
 
 ---
 
+## 5. Where the entitlement facts actually come from: a view projection
+
+The four mechanisms above answer *how a check evaluates*. This answers the question
+underneath it — **where does the entitlement logic come from in the first place?**
+
+In practice it comes from relational views with authoritative upstream providers,
+and applications entitle off them by JOINing the view to whatever data they are
+guarding. The JOIN is written once per application, differently each time. That is
+the cost this replaces.
+
+`asset_platform` models two such sources:
+
+```
+business_hierarchy  ->  scripts/ingest_business_hierarchy.py
+    unit_id, parent_unit_id  ->  (:OrgUnit)-[:PART_OF]->(:OrgUnit)
+    employee_id, unit_id     ->  (:Employee)-[:IN_UNIT]->(:OrgUnit)
+    employee_id, manager_id  ->  (:Employee)-[:REPORTS_TO]->(:Employee)
+    rank_level               ->  Employee.rankLevel      (a caller attribute)
+
+coverage_teams      ->  scripts/ingest_coverage_teams.py
+    team_id, employee_id     ->  (:Employee)-[:MEMBER_OF {role}]->(:CoverageTeam)
+    team_id, account_id      ->  (:CoverageTeam)-[:COVERS {validFrom, validTo}]->(:ClientOrg)
+```
+
+**Each output edge is one column pair of one input row.** That is the whole
+contract, and it is what makes these scripts trustworthy: no business logic lives
+in them, so they cannot decide anything, so they cannot decide anything wrong. All
+the entitlement logic stays in `bundle.yaml`, where it is declared, computable
+(`entitlement_surface.py`) and tested (`check_entitlements.py`).
+
+Three consequences:
+
+- **Swapping the real schema in is a column remap.** `COLUMNS` at the top of each
+  script; nothing else changes.
+- **The mess upstream stays upstream.** Whatever tangle of per-function logic
+  produces the authoritative view, the projection consumes its *output*. Do not
+  offer to reimplement the lineage.
+- **The projections validate their input and refuse to load a broken extract.** A
+  unit naming an absent parent, a manager not in the file, a non-numeric rank, or
+  two rows disagreeing about a coverage window are all reported and the load is
+  rejected — because every one of them cuts a traversal short, which under-grants
+  *silently*.
+
+**Failure direction.** Both views feed grants, so a missing row under-grants and a
+conformance case notices. The dangerous case is a feed that a **denial** depends on:
+the barrier stops applying and nothing is missing from anyone's results.
+`asset_platform` has exactly one — the desk restrictions traverse `IN_UNIT` from the
+HR view — and it is handled by an invariant asserting the barrier edges are present,
+plus by keeping `RESTRICTED_FOR` itself authored rather than ingested. See
+[entitlement-edges.md](entitlement-edges.md).
+
+**Load order is not cosmetic.** Each step joins to nodes the previous one created,
+and getting it wrong fails quietly: the graph loads with missing entitlement edges
+and callers see less than they should. `scripts/load_asset_platform.sh` encodes the
+order and runs the conformance suite at the end, which is the part that catches it.
+
+**Refresh.** The views are snapshots of current state, so the projections are
+idempotent and replace placement, membership and coverage for every entity the
+extract names. An entity that vanishes from the extract entirely is **reported, not
+deleted** — a truncated extract must not silently strip entitlement structure.
+`--prune` overrides that deliberately.
+
+---
+
 ## Operational checks worth wiring into CI
 
 | Check | Command | Catches |
 | --- | --- | --- |
 | Protected rows all carry an ACL | `validate_bundle.py` | option 1 failing open |
 | Entitlements still correct after a load | `check_entitlements.py` | seams that did not rebuild |
+| The same answers under a separated topology | `check_entitlements.py --identity-source remote` | predicate-composition defects invisible co-located |
 | The two recordings agree | a `differential:` case | property/relationship drift |
 | Anchors did not narrow entitlement | automatic in `check_entitlements.py` | a too-narrow cut hiding rows |
+| The extract itself is coherent | `ingest_*.py --dry-run` | a cut tree, a dangling manager, a conflicting window |
+| The model is still intact after a load | the `invariant:` cases | a lifted barrier, a missing caller attribute, a reporting cycle |
+| Which edges decide access, and who writes them | `entitlement_surface.py` | a barrier resting on a business feed |
 
-The first is the one that fails open. Prioritise it accordingly.
+The first is the one that fails open on the read path; the invariants are the ones
+that catch a feed failing open. Prioritise both accordingly — and note that the
+per-caller cases catch neither: a deliberate test here removed one employee's
+`rankLevel` and cut a desk out of the unit tree, all 31 per-caller cases still
+passed, and the invariants named both faults.

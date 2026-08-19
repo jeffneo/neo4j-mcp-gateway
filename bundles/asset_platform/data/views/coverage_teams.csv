@@ -1,0 +1,8 @@
+team_id,team_name,employee_id,coverage_role,account_id,account_name,valid_from,valid_to
+CT-EMEA-INST,EMEA Institutional Coverage,E-1003,primary,ACC-NW,Northwind Asset Management,2026-01-01,2026-12-31
+CT-EMEA-INST,EMEA Institutional Coverage,E-1003,primary,ACC-KC,Kestrel Capital,2026-01-01,2026-12-31
+CT-EMEA-INST,EMEA Institutional Coverage,E-1009,backup,ACC-NW,Northwind Asset Management,2026-01-01,2026-12-31
+CT-EMEA-INST,EMEA Institutional Coverage,E-1009,backup,ACC-KC,Kestrel Capital,2026-01-01,2026-12-31
+CT-APAC-INST,APAC Institutional Coverage,E-1005,primary,ACC-AP,Aster Pension Trust,2026-01-01,2026-12-31
+CT-EMEA-CORP,EMEA Corporate Coverage,E-1004,primary,ACC-RM,Rivermark Industries,2026-01-01,2026-12-31
+CT-EMEA-CORP,EMEA Corporate Coverage,E-1004,primary,ACC-KC,Kestrel Capital,2025-01-01,2025-12-31
