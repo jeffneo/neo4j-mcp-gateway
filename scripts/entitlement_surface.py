@@ -223,6 +223,89 @@ def write_guard(bundle: str, authored: list[str], feed_written: dict[str, str],
         excluded=excluded or "//   (none)\n")
 
 
+# BARRIER COUPLING
+# ---------------
+# When can an upstream feed lift an information barrier without touching the
+# barrier itself?
+#
+# Deny wins, so a denial must override EVERY grant for its label. Its own
+# reachability, though, depends on the edges its own pattern traverses. So:
+#
+#   a denial D can be severed while a grant G survives
+#       iff D traverses some FEED-WRITTEN edge that G does not.
+#
+# Sever that edge and D stops matching while G still does. Nothing is absent from
+# anybody's results — somebody simply sees more. No per-caller conformance case
+# notices unless it happens to enumerate that person, and no invariant over the
+# barrier edge notices either, because the barrier edge is still there.
+#
+# THE ONLY STRUCTURALLY TOTAL BARRIER IS ONE THAT TRAVERSES NOTHING. A `where`-only
+# denial — the Document embargo in `asset_platform` — depends on the row and on no
+# feed edge at all, so there is no edge to sever. Everything else is a trade-off,
+# and this report prices it rather than hiding it.
+#
+# Worth being honest about what moving a barrier onto a shared edge buys: it closes
+# the routes that share the edge, and nothing else. Moving the restricted-list
+# barrier from the caller's desk to their coverage team closed the HR-reorg lift
+# (the coverage grant now dies with the denial) and left the participation route
+# open, because attending a meeting has nothing to do with covering the account.
+def barrier_coupling(policy, feed_written: dict) -> list[dict]:
+    grants_by_label: dict[str, list] = {}
+    for grant in policy.grants:
+        grants_by_label.setdefault(grant.label, []).append(grant)
+
+    findings = []
+    for denial in policy.denials:
+        d_feed = {r for r in _rel_types(denial.via) if r in feed_written}
+        exposed = []
+        for grant in grants_by_label.get(denial.label, []):
+            severable = d_feed - set(_rel_types(grant.via))
+            if severable:
+                exposed.append({"grant": grant, "severable": sorted(severable)})
+        findings.append({"denial": denial, "feed_edges": sorted(d_feed),
+                         "exposed": exposed})
+    return findings
+
+
+def report_barrier_coupling(policy, feed_written: dict) -> None:
+    findings = barrier_coupling(policy, feed_written)
+    if not findings:
+        return
+    total = [f for f in findings if not f["feed_edges"]]
+    print(f"  BARRIER COUPLING ({len(findings)} denial(s))")
+    print("  Deny wins, so a denial must override every grant for its label — but it")
+    print("  only matches while its own path holds. A denial is severable against a")
+    print("  grant when it traverses a FEED-WRITTEN edge that grant does not: break")
+    print("  that edge and the barrier lifts while the grant survives. Nothing is")
+    print("  missing from anyone's results, so nothing detects it.\n")
+    for f in findings:
+        denial, exposed = f["denial"], f["exposed"]
+        head = f"{denial.label}: {denial.reason or '(no reason given)'}"
+        if not f["feed_edges"]:
+            print(f"    OK    {head}")
+            print("          traverses no feed-written edge — structurally total, "
+                  "there is nothing to sever")
+        elif not exposed:
+            print(f"    OK    {head}")
+            print(f"          every grant for {denial.label} traverses "
+                  f"{', '.join(f['feed_edges'])} too, so severing any of them "
+                  "withdraws the grant at the same moment")
+        else:
+            print(f"    !!    {head}")
+            print(f"          depends on {', '.join(f['feed_edges'])}; these grants "
+                  "survive if that is severed:")
+            for e in exposed:
+                print(f"            - {e['grant'].reason or '(no reason)'}")
+                print(f"              severable via {', '.join(e['severable'])}")
+    if total:
+        print(f"\n    {len(total)} of {len(findings)} denial(s) depend on no feed edge. "
+              "A barrier that must be")
+        print("    absolute has to be a condition on the ROW, not a traversal from the")
+        print("    caller — any caller-side path can be severed independently of some")
+        print("    grant route that the denial is there to override.")
+    print()
+
+
 def observed_types(config) -> set[str]:
     """Relationship types actually present in the database, if reachable."""
     try:
@@ -302,21 +385,7 @@ def main(argv: list[str]) -> int:
     print()
 
     # THE FAIL-OPEN CASE, and the reason write ownership is worth declaring at all.
-    at_risk = sorted(set(s["disabling"]) & set(feed_written))
-    if at_risk:
-        print(f"  !! BARRIERS THAT DEPEND ON A FEED-WRITTEN EDGE ({len(at_risk)})")
-        print("     A denial traverses these, and an upstream feed writes them. A")
-        print("     missing GRANT edge under-grants and someone complains; a missing")
-        print("     DENIAL edge lifts a barrier and FAILS OPEN, because nothing is")
-        print("     absent from anyone's results. No per-caller test can catch it —")
-        print("     only an invariant asserting the edge is still there.\n")
-        for rel in at_risk:
-            print(f"     {rel:20} written by {feed_written[rel]}")
-            for why in s["disabling"].get(rel, []):
-                print(f"         {why}")
-        print()
-    else:
-        print("  BARRIERS REST ONLY ON AUTHORED EDGES — no denial depends on a feed.\n")
+    report_barrier_coupling(policy, feed_written)
 
     # Declared but never traversed by a rule: not a risk, just noise to be sure of.
     stale = sorted(set(feeds) - decisive)

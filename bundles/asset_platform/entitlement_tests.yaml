@@ -540,11 +540,24 @@ cases:
   # more. So the barrier edges are asserted directly, by presence.
   - name: "invariant: the declared information barriers are all in place"
     invariant: |
-      UNWIND [{org:'Rivermark Industries', desk:'Institutional Sales EMEA'},
-              {org:'Rivermark Industries', desk:'Equity Derivatives EMEA'}] AS b
+      UNWIND [{org:'Rivermark Industries', group:'CT-EMEA-CORP',          key:'teamId'},
+              {org:'Rivermark Industries', group:'Equity Derivatives EMEA', key:'name'}] AS b
       WITH b WHERE NOT EXISTS {
-        MATCH (:ClientOrg {name: b.org})-[:RESTRICTED_FOR]->(:Desk {name: b.desk}) }
-      RETURN b.org AS restrictedOrg, b.desk AS desk
+        MATCH (:ClientOrg {name: b.org})-[:RESTRICTED_FOR]->(g)
+        WHERE g[b.key] = b.group }
+      RETURN b.org AS restrictedOrg, b.group AS restrictedFor
+    expect_count: 0
+
+  # A barrier that reaches nobody is not a barrier. RESTRICTED_FOR pointing at an
+  # empty coverage team, or at a desk with no staff, withdraws access from zero
+  # callers — present in the graph, asserted by the invariant above, and inert.
+  # This is the second half of that check and the one that survives a reorg.
+  - name: "invariant: every barrier reaches at least one caller"
+    invariant: |
+      MATCH (o:ClientOrg)-[:RESTRICTED_FOR]->(g)
+      WITH o, g, count { (:Employee)-[:MEMBER_OF|IN_UNIT]->(g) } AS bound
+      WHERE bound = 0
+      RETURN o.name AS restrictedOrg, coalesce(g.teamId, g.name) AS reachesNobody
     expect_count: 0
 
   # An interaction with no organisation is outside the reach of both the coverage

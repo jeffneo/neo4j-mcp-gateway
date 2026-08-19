@@ -225,10 +225,12 @@ Three consequences:
 **Failure direction.** Both views feed grants, so a missing row under-grants and a
 conformance case notices. The dangerous case is a feed that a **denial** depends on:
 the barrier stops applying and nothing is missing from anyone's results.
-`asset_platform` has exactly one — the desk restrictions traverse `IN_UNIT` from the
-HR view — and it is handled by an invariant asserting the barrier edges are present,
-plus by keeping `RESTRICTED_FOR` itself authored rather than ingested. See
-[entitlement-edges.md](entitlement-edges.md).
+The precise condition: a denial can be lifted while a grant survives whenever the
+denial traverses a feed-written edge that grant does not. `RESTRICTED_FOR` is kept
+authored, and the restricted-list barrier rides `MEMBER_OF` — the same edge as the
+coverage grant it overrides — so an HR reorg can no longer lift it. It is still
+severable against the *participation* route, which shares nothing with it, and the
+surface report prices exactly that. See [entitlement-edges.md](entitlement-edges.md).
 
 **Load order is not cosmetic.** Each step joins to nodes the previous one created,
 and getting it wrong fails quietly: the graph loads with missing entitlement edges

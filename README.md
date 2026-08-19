@@ -189,8 +189,12 @@ someone's ability to *write* it, not to tidy the diagram; full argument in
 [`docs/entitlement-edges.md`](docs/entitlement-edges.md).
 
 The report also flags a rule whose relationship type is absent from the graph — for
-a grant that under-grants, but **for a denial it fails open** — and separately flags
-every barrier resting on a feed-written edge.
+a grant that under-grants, but **for a denial it fails open** — and prices every
+denial for **barrier coupling**: a denial can be lifted while a grant survives
+whenever it traverses a feed-written edge that grant does not. Nothing is missing
+from anyone's results when that happens, so no per-caller case and no
+edge-presence invariant catches it. The only structurally total barrier is a
+`where`-only denial, which traverses nothing.
 
 **Thresholds are not principals.** `rankLevel >= 5` is an ordering, and a set of
 names cannot express one without minting a principal per rank. Declare
@@ -679,7 +683,7 @@ neo4j-mcp-gateway/
       bundle.yaml     #   security.mode: mediated + protected_labels
       tools/*.yaml    #   curated mediated tools (match/scope/return)
       data/iam_demo.cypher
-    asset_platform/   # the reference entitlement model — 20 labels, 46 cases
+    asset_platform/   # the reference entitlement model — 20 labels, 47 cases
       bundle.yaml     #   grants, denials, caller_attributes, ingested_rels
       tools/*.yaml    #   research, interactions, trade blotter, compensation
       data/views/     #   sample business_hierarchy + coverage_teams extracts

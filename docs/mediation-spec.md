@@ -486,9 +486,38 @@ both, and separately flags every barrier resting on a feed-written edge:
    WITH_ORG             written by platform_records
 ```
 
-The mitigation is an invariant asserting the barrier edges are present — the only
-kind of test that catches a lifted barrier. Worth running in CI beside the
-conformance suite.
+Worth running in CI beside the conformance suite.
+
+### Barrier coupling — when a feed can lift a barrier
+
+Deny wins, so a denial must override *every* grant for its label. But it only
+matches while **its own** path holds:
+
+> A denial **D** can be severed while a grant **G** survives **iff D traverses some
+> feed-written edge that G does not.**
+
+Sever it and the barrier lifts while the grant stands. Nothing is missing from
+anyone's results, so no per-caller case notices — and **an invariant asserting the
+barrier edge is present does not notice either, because that edge is still there.**
+The surface report prices it per denial:
+
+```
+!!    Interaction: the client organisation is restricted for this caller's coverage team
+      depends on MEMBER_OF, WITH_ORG; these grants survive if that is severed:
+        - participated in this interaction
+OK    Document: the document is under pre-publication embargo
+      traverses no feed-written edge — structurally total, there is nothing to sever
+```
+
+**The only structurally total barrier is one that traverses nothing** — a
+`where`-only denial depends on the row and on no feed edge. The cost is that it
+cannot be group-scoped: it denies everyone, including whoever the barrier was meant
+to leave alone. Group-scoped *and* immovable requires the caller-side hop to be an
+**authored** edge rather than an ingested one.
+
+Moving a barrier onto an edge its grant already uses closes the routes that share
+the edge, and nothing else — a real improvement, not a fix. See
+[entitlement-edges.md](entitlement-edges.md) for the worked example.
 
 ## 5e. Caller attributes — thresholds are not principals
 

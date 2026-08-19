@@ -16,7 +16,7 @@
 //  because it is where the entitlement policy actually lives:
 //
 //    (:Role)-[:SCOPED_TO {validFrom, validTo}]->(:Sector)   research scope
-//    (:ClientOrg)-[:RESTRICTED_FOR]->(:Desk)                a barrier
+//    (:ClientOrg)-[:RESTRICTED_FOR]->(:CoverageTeam)        a barrier
 //    (:Employee)-[:HAS_ROLE]->(:Role)                       role assignment
 //    the client-side population, which is not in an HR feed at all
 //
@@ -124,16 +124,45 @@ MATCH (r:Role {name:'sales-apac'}), (s:Sector {name:'Technology'})
 MERGE (r)-[:SCOPED_TO {validFrom: date('2024-01-01'), validTo: date('2024-12-31')}]->(s);
 
 // ---------- ENTITLEMENT: barriers ----------
-// Rivermark is restricted for two desks. Sam covers it and Tomas books against
-// it, so both restrictions WITHDRAW access those callers genuinely hold rather
-// than failing to grant it.
+// Rivermark is restricted for the team that covers it. Sam's team holds genuine
+// coverage, so this WITHDRAWS access he holds rather than failing to grant it.
 //
-// A barrier is the one thing here that must NEVER be derived from a business
-// feed. A missing grant edge under-grants and somebody complains; a missing
-// barrier edge fails OPEN and nobody notices, because nothing is missing from
-// anyone's results. Hence: authored, not ingested.
-MATCH (o:ClientOrg {name:'Rivermark Industries'}), (d:Desk {name:'Institutional Sales EMEA'})
-MERGE (o)-[:RESTRICTED_FOR]->(d);
+// THE BARRIER RIDES THE COVERAGE TEAM, NOT THE DESK, and that is a correctness
+// property rather than a matter of taste.
+//
+// It used to hang off (:Desk), reached from the caller by IN_UNIT — an edge the
+// business_hierarchy view writes. That made the barrier liftable by an ordinary
+// HR change: move somebody to another desk and the denial pattern stops matching
+// while their coverage grant, which runs through MEMBER_OF, survives untouched.
+// The barrier edge is still there; it just no longer reaches them. Nothing is
+// absent from anyone's results, so nothing detects it.
+//
+// Hung off (:CoverageTeam), the denial traverses MEMBER_OF and WITH_ORG — the
+// SAME edges the grant it overrides traverses. Now any feed change that breaks
+// the denial breaks the grant with it, and the caller sees nothing instead of
+// seeing more. The failure direction flips from open to closed.
+//
+// The general rule, checked by scripts/entitlement_surface.py: every FEED-WRITTEN
+// edge a denial traverses must also appear in a grant for the same label. Only
+// RESTRICTED_FOR itself is exempt, because it is authored here and no feed can
+// write it.
+MATCH (o:ClientOrg {name:'Rivermark Industries'}), (t:CoverageTeam {teamId:'CT-EMEA-CORP'})
+MERGE (o)-[:RESTRICTED_FOR]->(t);
+
+// The trading barrier stays on the DESK, and that is not an oversight. The rule
+// above is about who may learn of a relationship they are not part of; this one is
+// about who may see the desk's flow against a restricted counterparty. There is no
+// coverage team for a trading desk, so the team form cannot express it.
+//
+// It satisfies the coupling rule on its own terms: IN_UNIT is traversed by the
+// desk and supervision GRANTS for Trade as well, so a broken IN_UNIT withdraws
+// those grants at the same moment it withdraws this denial.
+//
+// What it cannot reach is the BOOKER. A trade is reachable by BOOKED_BY and by the
+// reporting line, neither of which traverses IN_UNIT, so no caller-side denial can
+// override them. Someone seeing the trade they booked themselves is not a barrier
+// failure — but it is the reason a barrier over trade data cannot be made total by
+// a traversal from the caller, and that limit belongs on the record.
 MATCH (o:ClientOrg {name:'Rivermark Industries'}), (d:Desk {name:'Equity Derivatives EMEA'})
 MERGE (o)-[:RESTRICTED_FOR]->(d);
 

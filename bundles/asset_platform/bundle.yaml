@@ -182,17 +182,43 @@ security:
       reason: "reads compensation across the unit they supervise, at managing-director rank"
 
   # Rules that WITHDRAW access someone otherwise holds.
+  #
+  # A BARRIER MUST RIDE THE SAME EDGES AS THE GRANT IT OVERRIDES. Both rules below
+  # traverse MEMBER_OF and the record's link to the organisation — exactly the
+  # edges the coverage grants traverse — so the only thing a denial depends on that
+  # a grant does not is RESTRICTED_FOR, which is authored and unwritable by any
+  # feed.
+  #
+  # That is what makes these fail CLOSED. An earlier version hung the barrier off
+  # the caller's desk, reached by IN_UNIT from the HR view. Moving somebody between
+  # desks then stopped the denial matching while their coverage grant, which never
+  # touched IN_UNIT, survived — a routine HR change lifting an information barrier,
+  # with every RESTRICTED_FOR edge still present and correct. Now any feed change
+  # that breaks the denial breaks the grant with it.
+  #
+  # scripts/entitlement_surface.py checks the rule and fails the build on a denial
+  # that depends on a feed-written edge no grant for that label uses.
   denials:
-    # A barrier: the client organisation is restricted for the caller's desk.
-    # Sam's team covers Rivermark, so his grant is real and this overrides it.
-    #
-    # IN_UNIT here comes from the business_hierarchy view, which makes this the
-    # riskiest edge in the bundle: it is a business fact that a BARRIER depends on,
-    # so a wrong desk in an HR extract silently lifts an information barrier. The
-    # barrier edge itself (RESTRICTED_FOR) is authored and never ingested.
     - label: Interaction
-      via: "(caller)-[:IN_UNIT]->(:Desk)<-[:RESTRICTED_FOR]-(:ClientOrg)<-[:WITH_ORG]-(resource)"
-      reason: "the client organisation is restricted for this caller's desk"
+      via: "(caller)-[:MEMBER_OF]->(:CoverageTeam)<-[:RESTRICTED_FOR]-(:ClientOrg)<-[:WITH_ORG]-(resource)"
+      reason: "the client organisation is restricted for this caller's coverage team"
+    - label: Trade
+      via: "(caller)-[:MEMBER_OF]->(:CoverageTeam)<-[:RESTRICTED_FOR]-(:ClientOrg)<-[:WITH_COUNTERPARTY]-(resource)"
+      reason: "the counterparty is restricted for this caller's coverage team"
+
+    # The trading barrier keeps the DESK form, because there is no coverage team
+    # for a trading desk and the question is different: not "may this person learn
+    # of a relationship they are not part of" but "may this desk see its own flow
+    # against a restricted name".
+    #
+    # It satisfies the coupling rule on its own terms — IN_UNIT is traversed by the
+    # desk and supervision GRANTS for Trade, so breaking it withdraws those grants
+    # at the same moment it withdraws this denial.
+    #
+    # Its limit is structural and worth stating: BOOKED_BY and REPORTS_TO reach a
+    # trade without touching IN_UNIT, so no caller-side denial can override the
+    # booker or their management line. A total barrier over trade data has to be a
+    # condition on the ROW — the shape the Document embargo below uses.
     - label: Trade
       via: "(caller)-[:IN_UNIT]->(:Desk)<-[:RESTRICTED_FOR]-(:ClientOrg)<-[:WITH_COUNTERPARTY]-(resource)"
       reason: "the counterparty is restricted for this caller's desk"

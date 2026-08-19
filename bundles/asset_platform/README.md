@@ -17,7 +17,7 @@ uv run python scripts/ingest_business_hierarchy.py                 # 2. people, 
 uv run python scripts/ingest_coverage_teams.py                     # 3. coverage
 cypher-shell -f bundles/asset_platform/data/identity.cypher        # 4. roles, scope, barriers
 cypher-shell -f bundles/asset_platform/data/trading.cypher         # 5. trades, compensation
-ACTIVE_BUNDLE=asset_platform uv run python scripts/check_entitlements.py   # 46 cases
+ACTIVE_BUNDLE=asset_platform uv run python scripts/check_entitlements.py   # 47 cases
 ```
 
 Getting the order wrong does not fail loudly. It produces a graph with missing
@@ -51,8 +51,16 @@ pair of one input row, so swapping the real schema in is editing `COLUMNS` at th
 top of the script. Sample extracts are in `data/views/`.
 
 `SCOPED_TO` and `RESTRICTED_FOR` are deliberately **authored, never ingested** —
-they exist only to express entitlement, and a barrier that a business feed can
-write is a barrier that a business feed can lift. See
+they exist only to express entitlement, and a barrier a business feed can write is
+a barrier a business feed can lift.
+
+Keeping the barrier *edge* authored is not sufficient on its own, because a denial
+also has to **reach** the caller. If it reaches them over an edge the grant it
+overrides does not use, a feed can sever that edge and lift the barrier with every
+`RESTRICTED_FOR` still in place. That is why the restricted-list barrier hangs off
+the caller's `CoverageTeam` rather than their `Desk`: the denial and the coverage
+grant now traverse the same `MEMBER_OF`, so severing it withdraws both. The
+`BARRIER COUPLING` section of the surface report prices what remains. See
 [docs/entitlement-edges.md](../../docs/entitlement-edges.md), and:
 
 ```bash
@@ -66,7 +74,7 @@ Employee ─HAS_ROLE→ Role ─SCOPED_TO {validFrom,validTo}→ Sector
    │  ├─IN_UNIT→ OrgUnit(:Desk) ─PART_OF→ OrgUnit(:BusinessUnit) ─PART_OF→ OrgUnit(:Division)
    │  ├─REPORTS_TO→ Employee
    │  ├─MEMBER_OF {role}→ CoverageTeam ─COVERS {validFrom,validTo}→ ClientOrg
-   │  └─WORKS_IN_REGION→ Region                     ClientOrg ←RESTRICTED_FOR─ Desk
+   │  └─WORKS_IN_REGION→ Region        ClientOrg ←RESTRICTED_FOR─ CoverageTeam / Desk
 ClientUser ─HAS_CLIENT_ROLE→ ClientRole   ─WORKS_FOR→ ClientOrg   ─SIGNED_UP_FOR→ Meeting
 
 Asset ─CLASSIFIED_AS→ SubIndustry ─NARROWER_THAN→ Industry ─NARROWER_THAN→ Sector
@@ -109,7 +117,7 @@ or "the unit tree above it".
 | `priya.raman` | **5 MD** | Global Research | supervises research — and **no trades**, being in another unit |
 | `oscar.lindgren` | 4 ED | Institutional Sales EMEA | coverage of Northwind and Kestrel; his reports' compensation |
 | `nina.holt` | 2 | Institutional Sales EMEA | the **same** coverage as Oscar, being on the same team |
-| `sam.okoye` | 2 | Institutional Sales EMEA | covers Rivermark — **restricted for his desk**; Kestrel coverage **expired in 2025** |
+| `sam.okoye` | 2 | Institutional Sales EMEA | his team covers Rivermark — **restricted for that team**; its Kestrel coverage **expired in 2025** |
 | `yuki.tanaka` | 3 VP | Institutional Sales APAC | covers Aster; her Technology scope **expired in 2024** |
 | `hana.kim` | **5 MD** | Institutional Client | compensation across her unit |
 | `noor.haddad` | **5 MD** | Global Markets | every trade on both markets desks |
@@ -155,7 +163,7 @@ structural: both traverse the same `(:CoverageTeam)` node rather than relying on
 projected rows agreeing.
 
 **Sam's empty blotter has two different causes.** His team's Rivermark coverage is
-real and the desk restriction withdraws it; his team's Kestrel coverage expired in
+real and the restriction on that team withdraws it; his team's Kestrel coverage expired in
 2025 and was never granted. Same row count, different reasons — which
 `explain-access` distinguishes and a count cannot.
 
@@ -176,6 +184,17 @@ universe is not the secret; the research about it is.
 variable must be explicitly granted, and anything carrying no access-control list is
 refused. Naming a reference-data variable there made `asset_universe` return nothing
 to anybody.
+
+**Keeping a policy edge authored does not make a barrier immovable.** The
+restricted-list barrier used to hang off the caller's desk. Moving one person
+between desks — an ordinary HR change, with both `RESTRICTED_FOR` edges present and
+correct — lifted it, because the denial reached them by `IN_UNIT` while the coverage
+grant it overrode ran through `MEMBER_OF`. Hanging it off the `CoverageTeam` closed
+that: the denial and the grant now share an edge, so severing it withdraws both.
+It does **not** close the participation route, which shares nothing with either —
+and that residual is the general result. A barrier that must be absolute has to be
+a condition on the row, like the embargo. `entitlement_surface.py` reports the
+severable pairs per denial rather than leaving it to be discovered.
 
 **Per-caller cases do not catch a damaged model.** A deliberate test removed one
 employee's `rankLevel` and cut a desk out of the unit tree. All 31 per-caller cases

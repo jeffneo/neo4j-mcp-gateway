@@ -114,16 +114,90 @@ not depend on anybody remembering to run a test.
 > Promote to a rail when you need to **revoke someone's ability to write it** — not
 > when you want the diagram tidier.
 
-And two hard constraints:
+And one hard constraint: **never derive a denial onto a rail.** A grant rail that
+misses an edge under-grants, and somebody complains. A denial rail that misses an
+edge fails **open**, and nobody does.
 
-- **Never derive a denial onto a rail.** A grant rail that misses an edge
-  under-grants, and somebody complains. A denial rail that misses an edge fails
-  **open**, and nobody does.
-- **Never let a barrier depend on a feed-written edge** where you can avoid it.
-  `asset_platform` currently violates this — its two desk restrictions traverse
-  `IN_UNIT` from the HR view — and the surface report flags it by name. The
-  mitigation is an invariant asserting the barrier edges are present, which is
-  the only kind of test that catches a lifted barrier.
+---
+
+## When can a feed lift a barrier?
+
+Deny wins, so a denial must override *every* grant for its label. But the denial
+only matches while **its own** path holds. That asymmetry is the whole problem:
+
+> A denial **D** can be severed while a grant **G** survives
+> **iff D traverses some feed-written edge that G does not.**
+
+Sever that edge and D stops matching while G still does. Nothing is absent from
+anybody's results — somebody simply sees more. No per-caller case notices unless it
+happens to enumerate that person, and **no invariant over the barrier edge notices
+either, because the barrier edge is still there.**
+
+Computed per denial:
+
+```bash
+uv run python scripts/entitlement_surface.py asset_platform    # BARRIER COUPLING
+```
+
+```
+!!    Interaction: the client organisation is restricted for this caller's coverage team
+      depends on MEMBER_OF, WITH_ORG; these grants survive if that is severed:
+        - participated in this interaction
+OK    Document: the document is under pre-publication embargo
+      traverses no feed-written edge — structurally total, there is nothing to sever
+```
+
+### Worked example: moving a barrier from the desk to the coverage team
+
+The restricted-list barrier originally hung off the caller's `Desk`, reached by
+`IN_UNIT` from the HR view. The coverage *grant* it existed to override runs through
+`MEMBER_OF`, and shares nothing with it. So:
+
+```
+HR feed moves Sam to another desk. RESTRICTED_FOR untouched, both edges present.
+
+  sam sees before:  (nothing — denied)
+  sam sees after:   INT-2
+```
+
+Hanging it off `CoverageTeam` instead makes the denial traverse `MEMBER_OF` and
+`WITH_ORG` — the same edges as the coverage grant. The reorg lift closes: severing
+either now withdraws the grant at the same moment it withdraws the denial.
+
+```
+  sam after the desk move:      (still denied)
+```
+
+**It does not close everything, and the report says so.** Sam also
+`PARTICIPATED_IN` that interaction, and attending a meeting has nothing to do with
+covering the account:
+
+```
+  sam after losing MEMBER_OF:   INT-2      <- grant gone, denial gone, participation survives
+```
+
+Which is the general result: **the only structurally total barrier is one that
+traverses nothing.** A `where`-only denial depends on the row and on no feed edge,
+so there is no edge to sever:
+
+```yaml
+- label: Document
+  where: "resource.embargoed = true"
+```
+
+The cost is that a row condition cannot be group-scoped — it denies everyone,
+including the people the barrier was meant to leave alone. Group-scoped *and*
+absolute is only available when the caller-side hop is **authored** rather than
+ingested (`HAS_ROLE` here), which trades precision for immovability.
+
+So the honest ranking, and the reason this is a report rather than a rule:
+
+| Barrier form | Severable by a feed | Group-scoped |
+| --- | --- | --- |
+| Row condition (`where` only) | **no** | no — denies everyone |
+| Caller-side hop over an **authored** edge | **no** | yes, but only at role granularity |
+| Caller-side hop sharing every grant's edges | no, for those grants | yes |
+| Caller-side hop sharing some grants' edges | yes, for the rest | yes |
 
 ---
 
@@ -226,6 +300,7 @@ appears. No schema change, no principal minted.
 | Cycle in `REPORTS_TO` | **over-grants** across the cycle | invariant; bounded walk limits blast radius |
 | Coverage window absent | grant withheld silently | invariant over `validFrom` |
 | Feed-written edge changed correctly-but-unexpectedly | access moves | the computed list, plus conformance after every load |
+| Feed severs an edge a **denial** uses but a grant does not | **barrier lifts, fails OPEN** | `BARRIER COUPLING` in the surface report — no per-caller case or edge-presence invariant sees it |
 | An author's `where` with a top-level `OR` | **disclosure**, under a separated topology only | `check_entitlements.py --identity-source remote` |
 
 The last row is not hypothetical. `AND` binds tighter than `OR`, so composing an
