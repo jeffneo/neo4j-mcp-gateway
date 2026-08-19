@@ -190,7 +190,7 @@ NEO4J_MCP_AUDIT_ARGUMENTS=true    # optional: also record argument VALUES
 
 ```json
 {"ts":"2026-08-18T19:18:36.407+00:00","event":"tool_call","tool":"client_opportunities",
- "bundle":"client_platform","mode":"mediated","identitySource":"graph","grantModel":"both",
+ "bundle":"asset_platform","mode":"mediated","identitySource":"graph","grantModel":"both",
  "principal":"evan.brooks@bank.com","principalSource":"impersonation-request",
  "impersonated":true,"argumentNames":["client"],"durationMs":18.1,"outcome":"ok","rows":1}
 ```
@@ -282,10 +282,11 @@ identity:
     Interaction: loggedByEmail
 ```
 
-The `client_platform_split` bundle runs this way against a database holding **no
-`AdGroup` or `User` nodes at all**, with results identical to co-located across
-24 comparisons. Each grant also loses a hop, and a boundary property on the row
-itself collapses to a bare comparison with no subquery.
+Measured against a database holding **no proxy nodes at all**, results were
+identical to co-located across 24 comparisons. Each grant also loses a hop, and a
+boundary property on the row itself collapses to a bare comparison with no
+subquery. See the recipe in
+[`docs/entitlement-testing-tutorial.md`](docs/entitlement-testing-tutorial.md).
 
 > The property and the relationship are two recordings of one fact and can drift
 > apart. Nothing detects that from the pattern alone, so keep a `differential:`
@@ -334,12 +335,8 @@ Want to try the entitlement model on Aura?
 walks through it across six identity/data topologies.
 
 Shipped bundles: **`ato`** (account-takeover; 7 YAML tools; `mode: open`),
-**`client_platform`** (institutional client platform, up/cross-sell;
-`mode: mediated`), **`client_platform_split`** (the same platform with identity
-in a separate database — see
-[`security.identity.source`](#where-identity-lives)),
 **`asset_platform`** (sector-classified asset universe; taxonomy-scoped
-entitlement, two caller classes, dated scopes) and
+entitlement, two caller classes, dated scopes; the reference model) and
 **`iam`** (investment-bank entitlements; `mode: mediated`, curated tools filtered
 per caller, raw `read-cypher` auto-hidden). Neither bundle contains security
 code — a bundle declares a policy and the engine enforces it.

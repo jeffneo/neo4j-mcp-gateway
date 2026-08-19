@@ -65,7 +65,7 @@ data, not only against the demo dataset.
 ```
 
 **Who writes it:** identity sync for the membership half, the business feed for
-the seams. `identity.cypher` in the `client_platform` bundle is deliberately a
+the seams. `identity.cypher` in the `asset_platform` bundle is deliberately a
 separate file from `platform.cypher` for exactly this reason — two owners, two
 refresh cycles.
 
@@ -100,9 +100,11 @@ traverses, plus the data-side relationships.
 | `(:User)-[:MEMBER_OF]->(:AdGroup)` | `(:Client)-[:COVERED_BY]->(:AdGroup)` |
 | | `(:User)-[:LOGGED]->(:Interaction)` |
 
-[`proxies.cypher`](../bundles/client_platform_split/data/proxies.cypher) builds
-these from properties `platform.cypher` already writes, so the proxy feed needs
-nothing from the identity system.
+A proxy script builds these — see the recipe in
+[`entitlement-testing-tutorial.md`](entitlement-testing-tutorial.md). Where the
+business feed already records the fact as a property (an author's address, a
+covering team) the proxies can be derived from it and need nothing from the
+identity system; where it does not, they have to be fed separately.
 
 **Division of labour, and why it is defensible:** *membership* stays in the
 identity store — the high-churn half, the part that changes when someone moves
@@ -153,8 +155,8 @@ Nothing in the query can detect that. Two defences:
 
 - keep a `differential:` conformance case, which runs the same question under
   both models and fails on divergence;
-- or pick one recording and derive the other at load time, as `proxies.cypher`
-  does — it builds `COVERED_BY` *from* `coverageTeam`, so they cannot disagree.
+- or pick one recording and derive the other at load time — build the
+  relationship *from* the property, so the two cannot disagree.
 
 The second is strictly better where you can do it.
 

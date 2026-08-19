@@ -1,380 +1,354 @@
 # Tutorial: testing entitlements on Aura
 
-Run the entitlement model against Aura and see the identity graph for yourself.
-Uses the `client_platform` bundle — an institutional client platform where clients
-consume research, analytics, execution and data products, and the commercial
-question is which product to offer next — plus `client_platform_split`, the same
-platform with the identity graph in a different database.
+Run the entitlement model against Aura and see the entitlement graph for yourself.
+Uses the **`asset_platform`** bundle: research, client interactions and meetings
+are all about assets, and entitlement follows from sector scope, client coverage
+and personal involvement.
 
-The dataset ships as **two separate Cypher files** — that separation is the point
-of this tutorial:
+The dataset ships as **two Cypher files**, and that separation is the point:
 
-| File | Contains | Labels |
-| --- | --- | --- |
-| `data/platform.cypher` | the business graph | `Client`, `Product`, `UsageSummary`, `Interaction`, `Opportunity`, `ResearchNote` |
-| `data/identity.cypher` | the identity graph | `User`, `AdGroup`, `Desk` |
+| File | Contains |
+| --- | --- |
+| `data/platform.cypher` | the business graph — `Asset`, `Document`, `Interaction`, `Meeting`, `Sector`/`Industry`/`SubIndustry`, `AssetClass`, `Issuer`, `ClientOrg` |
+| `data/identity.cypher` | identity **and the entitlement layer** — `Employee`, `ClientUser`, `Role`, `ClientRole`, `Desk`, `BusinessUnit`, `Division`, `Region` |
 
-They meet at exactly three seams, all created by `identity.cypher`:
+`platform.cypher` has no dependency on identity — it records authorship and
+attendance as *properties* and lets `identity.cypher` promote them. So load
+**platform first, identity second**. The seams identity creates:
 
 ```
-(:Client)-[:COVERED_BY]->(:AdGroup)     team coverage
-(:User)-[:COVERS]->(:Client)            named individual coverage
-(:User)-[:LOGGED]->(:Interaction)       authorship
+(:Role)-[:SCOPED_TO {validFrom,validTo}]->(:Sector)     research scope
+(:Employee)-[:COVERS]->(:ClientOrg)                     coverage
+(:ClientOrg)-[:RESTRICTED_FOR]->(:Desk)                 a barrier
+(:Document)-[:AUTHORED_BY]->(:Employee)                 authorship
+(:Employee|:ClientUser)-[:PARTICIPATED_IN]->(:Interaction)
 ```
-
-`platform.cypher` has **no dependency** on the identity graph — it records the
-covering team as a property and lets `identity.cypher` promote it to a
-relationship. That is what makes the separated topologies below possible, so load
-**platform first, identity second**.
 
 ---
 
-## Which topology to try
+## Which topology
 
-| | Arrangement | Instances | Works today | Path grants |
+| | Arrangement | Instances | Works | Path grants |
 | --- | --- | --- | --- | --- |
-| **A** | one graph, identity and business data intermingled | 1 | ✅ | ✅ |
-| **B** | one graph, distinct subgraphs joined at defined seams | 1 | ✅ | ✅ |
-| **C** | two business domains, **each with its own copy of identity** | 2 | ✅ | ✅ |
-| **D** | identity in one database, the data in another, **naively** | 2 | ❌ | — |
-| **E** | same split, joined by a **composite database** | 1–2 | ✅ | ✅ via proxy nodes |
-| **F** | same split, identity resolved over a **second connection** | 2 | ✅ | ✅ via proxy nodes |
+| **A** | one graph, identity and data intermingled | 1 | ✅ | ✅ |
+| **B** | one graph, distinct subgraphs joined at named seams | 1 | ✅ | ✅ |
+| **C** | two domains, **each with its own copy of identity** | 2 | ✅ | ✅ |
+| **D** | identity in one database, data in another, **naively** | 2 | ❌ | — |
+| **E** | same split, joined by a **composite database** | 1–2 | ✅ | ✅ via proxies |
+| **F** | same split, identity over a **second connection** | 2 | ✅ | ✅ via proxies |
 
-A and B are the same physically and differ in modelling discipline; B is what you
-would actually govern. C is the multi-bundle setup.
+**A is the default and what the bundle ships configured for.** B is the same
+physically and differs in modelling discipline. C is the multi-bundle setup.
 
-**D, E and F are the same physical arrangement with three different answers.**
-D is what happens if you split identity from data and change nothing else — it
-fails. E and F are the two supported ways to make that split work, and **both
-keep path grants** by cutting each traversal at a node present in both databases.
-They differ only in how the caller's principals reach the data query. Read D
-first; it explains why the naive split fails.
-
-### C and D are not "one instance vs two" — read this before skipping
-
-Both C and D use two instances, so the instance count is not what separates them.
-**What separates them is whether a single query has to cross the boundary.**
-
-```
-  C — works                              D — does not work
-  ┌── instance 1 ──────────┐             ┌── instance 1 ─────┐
-  │ client platform data   │             │ identity graph    │
-  │ + identity  (a copy)   │             │ (only)            │
-  └────────────────────────┘             └───────────────────┘
-  ┌── instance 2 ──────────┐             ┌── instance 2 ─────┐
-  │ iam data               │             │ business data     │
-  │ + identity  (a copy)   │             │ (only)            │
-  └────────────────────────┘             └───────────────────┘
-  Every query resolves the caller        Resolving the caller and reading the
-  and reads the data in ONE place.       data are in DIFFERENT places, and one
-  The boundary is between DOMAINS.       Cypher statement cannot span them.
-```
-
-In C the identity graph is **replicated** — instance 1 and instance 2 each hold
-their own copy, so each is independently self-sufficient. The split is *domain vs
-domain*: client-platform data over here, IAM data over there, neither needing the
-other. That is why it works, and it is why `identity.cypher` is a standalone file
-you can run against as many instances as you like.
-
-In D the identity graph is **not** replicated: it lives in one instance and is
-expected to authorize data sitting in another. Mediation composes a *single*
-Cypher statement — resolve the caller, run the query, filter the results — and a
-statement cannot traverse two databases, so the authorization prelude has nothing
-to resolve against.
-
-The distinction is worth being precise about in an architecture conversation,
-because "put identity in its own database" sounds like good hygiene and is the
-one arrangement that does not work on its own. The fix is **replication** (C), or
-declaring a separated identity source so the engine composes the query
-differently (**E** and **F**). Note that E's split still requires replicating the
-*seam nodes* into the data constituent — see
-[how they keep path grants](#how-e-and-f-keep-path-grants-proxy-nodes) — so "no duplication" is
-never actually on the menu.
+**D, E and F are one physical arrangement with three answers.** D is what happens
+if you split identity from data and change nothing else: it fails. E and F both
+work and both keep path grants. They are documented as a **recipe** below rather
+than as a shipped bundle — the config is small, and carrying a second copy of a
+bundle to demonstrate a config flag was not worth the duplication.
 
 ---
 
 ## Setup
 
 ```bash
-git clone <repo> && cd neo4j-mcp-gateway
 uv sync
-cp .env.example .env
+cp .env.example .env      # then put your Aura connection in it
 ```
-
-Put your Aura connection in `.env` — from the credentials file Aura gives you at
-instance creation:
 
 ```bash
 NEO4J_URI=neo4j+s://xxxxxxxx.databases.neo4j.io
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<your password>
 NEO4J_DATABASE=neo4j
+NEO4J_MCP_ALLOW_IMPERSONATION=true
+NEO4J_MCP_PRINCIPAL=dana.whitfield@bank.com
 ```
 
-> Aura Free and Professional give you **one database per instance**, always called
-> `neo4j`. "Two databases" therefore means **two instances**. AuraDB Business
-> Critical and Virtual Dedicated Cloud support more databases per instance, in
-> which case topology C can also be done with one instance and two databases.
+> Aura Free and Professional give **one database per instance**, always called
+> `neo4j` — so "two databases" means two instances. Business Critical and Virtual
+> Dedicated Cloud support several per instance, which makes C, E and F possible on
+> one.
 
 ---
 
 ## Topology A — one instance, one graph
 
-The simplest thing that works. Both halves in the same database.
-
 ```bash
-export NEO4J_URI=... NEO4J_USERNAME=neo4j NEO4J_PASSWORD=... NEO4J_DATABASE=neo4j
+cypher-shell -a "$NEO4J_URI" -u neo4j -p "$NEO4J_PASSWORD" \
+  -f bundles/asset_platform/data/platform.cypher
+cypher-shell -a "$NEO4J_URI" -u neo4j -p "$NEO4J_PASSWORD" \
+  -f bundles/asset_platform/data/identity.cypher
 
-cypher-shell -a "$NEO4J_URI" -u "$NEO4J_USERNAME" -p "$NEO4J_PASSWORD" \
-  -f bundles/client_platform/data/platform.cypher
-cypher-shell -a "$NEO4J_URI" -u "$NEO4J_USERNAME" -p "$NEO4J_PASSWORD" \
-  -f bundles/client_platform/data/identity.cypher
+ACTIVE_BUNDLE=asset_platform uv run python scripts/check_entitlements.py
 ```
 
-Enable impersonation so you can act as each persona, then run the conformance
-suite:
+Expect **21 passed, 0 failed**. Then run the same tool as different people:
 
 ```bash
-export ACTIVE_BUNDLE=client_platform
-export NEO4J_MCP_ALLOW_IMPERSONATION=true
-export NEO4J_MCP_PRINCIPAL=grace.okonjo@bank.com
-
-uv run python scripts/check_entitlements.py
+ACTIVE_BUNDLE=asset_platform uv run python scripts/try_tool.py \
+  asset_research principal=ella.moreau@bank.com
+ACTIVE_BUNDLE=asset_platform uv run python scripts/try_tool.py \
+  asset_research principal=raj.patel@bank.com
+ACTIVE_BUNDLE=asset_platform uv run python scripts/try_tool.py \
+  asset_research principal=mia.torres@northwind.com
 ```
 
-Expect **12 passed, 0 failed**. Then try a tool as different people:
+| Caller | Sees | Because |
+| --- | --- | --- |
+| `ella.moreau` | DOC-1, DOC-4 | Energy sector scope, plus what she authored |
+| `raj.patel` | DOC-2 | Technology sector scope |
+| `oscar.lindgren` | DOC-1, DOC-2 | covers Northwind and Kestrel |
+| `yuki.tanaka` | DOC-4 | authorship and coverage — her Technology scope **expired in 2024** |
+| `dana.whitfield` | DOC-1, DOC-2, DOC-4 | supervision, by access-control list |
+| `mia.torres` | DOC-1 | **client user**, her own organisation's research |
+| `liam.becker` | DOC-2 | **client user**, a different organisation |
 
-```bash
-uv run python scripts/try_tool.py client_opportunities principal=evan.brooks@bank.com
-uv run python scripts/try_tool.py client_opportunities principal=peter.lindqvist@bank.com
-```
+`DOC-3` is invisible to everyone, including its author and supervision: it is
+under embargo, and a denial beats every route.
 
-Same tool, same question — `evan` sees one opportunity worth $120,000, compliance
-sees four worth $900,000. **The total is computed after filtering**, so each
-caller gets their own honest number rather than the firm's.
-
-### Look at the identity graph
-
-In Aura's Query browser:
+### Look at the entitlement graph
 
 ```cypher
-// The identity graph on its own
-MATCH p = (u:User)-[:MEMBER_OF]->(:AdGroup) RETURN p;
+// The entitlement layer on its own — the three facts that decide everything
+MATCH p = (:Role)-[:SCOPED_TO]->(:Sector) RETURN p;
+MATCH p = (:Employee)-[:COVERS]->(:ClientOrg) RETURN p;
+MATCH p = (:ClientOrg)-[:RESTRICTED_FOR]->(:Desk) RETURN p;
 
-// The seams — where identity meets the business graph
-MATCH p = (:User)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client) RETURN p;
+// One caller's full reach
+MATCH p = (e:Employee {email:'ella.moreau@bank.com'})-[:HAS_ROLE|COVERS|WORKS_FOR]->()
+RETURN p;
 
-// One person's full reach: groups, covered clients, and what they logged
-MATCH p = (u:User {email:'lena.fischer@bank.com'})-[:MEMBER_OF|COVERS|LOGGED|ON_DESK]->()
+// The taxonomy route, end to end
+MATCH p = (:Role {name:'research-energy'})-[:SCOPED_TO]->(:Sector)
+          <-[:NARROWER_THAN*1..2]-(:SubIndustry)<-[:CLASSIFIED_AS]-(:Asset)
 RETURN p;
 ```
 
-And ask the gateway why a specific record is visible:
+And ask why a specific record is visible:
 
 ```bash
-uv run python - <<'EOF'
+ACTIVE_BUNDLE=asset_platform uv run python - <<'EOF'
 import asyncio, warnings; warnings.simplefilter("ignore")
 from gateway.config import Config
 from gateway.yaml_tools import Neo4jExecutor
 from gateway.security_tools import build_explain_access
-c = Config.from_env(); ex = Neo4jExecutor(c)
+c = Config.from_env(active_bundle="asset_platform"); ex = Neo4jExecutor(c)
 fn = build_explain_access(c, ex).fn
 async def main():
-    for who in ["nadia.haddad@bank.com", "sofia.rossi@bank.com", "evan.brooks@bank.com"]:
-        r = await fn(resource="INT-2006", principal=who)
-        print(who, "->", "GRANTED" if r["granted"] else "no access")
-        for g in r.get("grantedBy", []):
-            print("   ", g["reason"], "\n    ", g["path"])
+    for res, who in [("DOC-4","ella.moreau@bank.com"), ("DOC-4","raj.patel@bank.com"),
+                     ("DOC-3","ella.moreau@bank.com"), ("INT-2","sam.okoye@bank.com")]:
+        r = await fn(resource=res, principal=who)
+        print(f"  {res} {who:26} granted={bool(r['granted'])}")
+        for d in r.get("deniedBy", []): print("     DENIED:", d["reason"])
+        for g in r.get("grantedBy", []): print("     via:   ", g["reason"])
 asyncio.run(main())
 EOF
 ```
 
-`nadia` reaches it *only* through `LOGGED` — she does not cover that client — so
-the answer shows a path. `sofia` reaches the same record through her coverage
-team. `evan` gets no access, and the answer deliberately does not reveal whether
-the record exists.
+`ella` reaches `DOC-4` through the sector scope alone — she did not write it,
+does not cover the organisation it went to, and is not named in its list. `raj`
+gets no answer at all, and it is deliberately indistinguishable from the record
+not existing. `DOC-3` and `INT-2` report the grants a denial overrode.
 
 ---
 
-## Topology B — one instance, two subgraphs
+## Topology B — one instance, two governed subgraphs
 
-Physically identical to A; the difference is that you treat identity as a
-separate asset with its own lifecycle. Load the same two files, then govern them
-apart:
-
-- reload `identity.cypher` on its own when people move teams — it wipes and
-  rebuilds only `source:'cp-identity'` nodes
-- reload `platform.cypher` on its own when business data refreshes
-- check the seams have survived a reload:
+Physically identical to A; the difference is treating identity as a separate
+asset with its own lifecycle. Reload either half independently, then check the
+seams survived:
 
 ```cypher
-MATCH (:Client)-[r:COVERED_BY]->(:AdGroup) RETURN count(r) AS teamCoverage;
-MATCH (:User)-[r:COVERS]->(:Client)        RETURN count(r) AS namedCoverage;
-MATCH (:User)-[r:LOGGED]->(:Interaction)   RETURN count(r) AS authorship;
+MATCH (:Role)-[r:SCOPED_TO]->(:Sector)      RETURN count(r) AS researchScopes;
+MATCH (:Employee)-[r:COVERS]->(:ClientOrg)  RETURN count(r) AS coverage;
+MATCH (:Document)-[r:AUTHORED_BY]->()       RETURN count(r) AS authorship;
+MATCH (:ClientOrg)-[r:RESTRICTED_FOR]->()   RETURN count(r) AS barriers;
 ```
 
 > Reload order matters: `identity.cypher` builds the seams, so run it **after**
-> any reload of `platform.cypher`, or coverage relationships will be missing and
-> callers will silently see less than they should. `check_entitlements.py` catches
-> exactly this — a seam that failed to rebuild shows up as a `must_see` failure.
-
-This is the arrangement to govern in production: one graph, two clearly owned
-subgraphs, joined only at seams you can enumerate and test.
+> any reload of `platform.cypher`. Get it backwards and callers silently see less
+> than they should. `check_entitlements.py` catches exactly this as a `must_see`
+> failure, which is the reason to run it after every load.
 
 ---
 
-## Topology C — two Aura instances, one bundle each
+## Topology C — two instances, one bundle each
 
-Two **business domains** on two instances, each instance holding its own copy of
-the identity graph. Each bundle carries its own connection, so put a git-ignored
-`.env` in each bundle directory:
+Each bundle carries its own connection, so two bundles can sit on two instances.
+Put a git-ignored `.env` in each bundle directory:
 
 ```bash
-# bundles/client_platform/.env
+# bundles/asset_platform/.env
 NEO4J_URI=neo4j+s://<instance-1>.databases.neo4j.io
-NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<password 1>
 NEO4J_DATABASE=neo4j
 ```
 
 ```bash
-# bundles/iam/.env
-NEO4J_URI=neo4j+s://<instance-2>.databases.neo4j.io
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=<password 2>
-NEO4J_DATABASE=neo4j
+ACTIVE_BUNDLE=asset_platform,iam uv run neo4j-mcp-gateway
 ```
 
-Serve both from one endpoint:
+Tools are namespaced per bundle — `asset_platform_asset_research`,
+`iam_secure-read-cypher` — and each keeps its own security posture and
+connection.
 
-```bash
-ACTIVE_BUNDLE=client_platform,iam uv run neo4j-mcp-gateway
-```
-
-Tools are namespaced per bundle — `client_platform_client_opportunities`,
-`iam_secure-read-cypher` — and each bundle keeps its own security posture and its
-own connection. Validate each in turn:
-
-```bash
-ACTIVE_BUNDLE=client_platform,iam uv run python scripts/validate_bundle.py
-```
-
-**Each instance needs its own identity data** — run `identity.cypher` against
-both. This is the load-bearing difference from topology D: the identity graph is
-replicated into every instance that must enforce against it, so no query ever has
-to cross the boundary. That is a real production pattern — identity synced into
-each domain database — and it is why `identity.cypher` is a standalone file with
-no dependency on any particular business dataset.
-
-Prove the replication is doing the work: drop identity from one instance and
-watch that bundle's callers fall to zero rows while the other bundle is
-unaffected.
+**Each instance needs its own identity data.** That is the load-bearing
+difference from D: identity is *replicated* into every instance that enforces
+against it, so no query crosses the boundary. Prove it by deleting identity from
+one instance and watching only that bundle's callers fall to zero:
 
 ```cypher
-// against the client_platform instance only
-MATCH (n {source:'cp-identity'}) DETACH DELETE n;
+MATCH (n {source:'ap-identity'}) DETACH DELETE n;    // one instance only
 ```
 
-`check_entitlements.py` then fails `must_see` on every client_platform case while
-the `iam` bundle keeps passing — the two instances are genuinely independent.
-Reload `identity.cypher` to restore it.
-
 > The gateway **refuses to start** if an `open` bundle and a `mediated` bundle
-> resolve to the same database, since the open bundle's unfiltered tools would
-> read the rows the mediated one protects. Separate instances avoid this
-> entirely.
+> resolve to the same database. Separate instances avoid it entirely.
+
+Note that invariant cases are **graph-wide**, so two bundles sharing one database
+will each report the other's access-control entries as unresolvable principals.
+That is correct — the graph is shared — but a bundle wanting clean invariants
+wants its own database.
 
 ---
 
-## Topology D — identity in a different database, and nothing else changed
+## Topology D — identity split out, and nothing else changed
 
 **This does not work, and it is worth understanding why before reaching for E or F.**
 
 Mediation composes a *single* Cypher statement: resolve the caller, run the
-query, filter the results. A single statement cannot traverse two databases, so
-if the identity graph lives in instance 1 and the business data in instance 2,
-the authorization prelude has nothing to resolve against.
+query, filter the results. A statement cannot traverse two databases, so with
+identity in one instance and business data in another the authorization prelude
+has nothing to resolve against.
 
-If you try topology D as it stands, `identity.cypher` will load its people and
-groups into the identity instance and silently create **no seams** — there are no
-`Client` nodes there to attach to. Callers then resolve to their groups but match
-no business data, and `check_entitlements.py` reports `must_see` failures rather
-than anything dangerous. It fails closed, which is the right direction, but it
-fails.
+`identity.cypher` will load people and roles into the identity instance and
+silently create **no seams** — there are no `Sector` or `ClientOrg` nodes there to
+attach to. Callers then resolve to their roles but match no data, and
+`check_entitlements.py` reports `must_see` failures. It fails closed, which is the
+right direction, but it fails.
 
-You have four options:
+Four ways out:
 
-1. **Replicate identity into each business database** — topology C. Simple,
-   works now, keeps everything including path grants.
-2. **Join the two databases with a composite database** — topology E below.
-3. **Resolve identity over a second connection** — topology F below.
-4. **Push the check into the database** with native controls, so the business
-   instance enforces per-user rules without needing the identity graph locally.
-   See §6 of [`entitlement-model-brief.md`](entitlement-model-brief.md).
+1. **Replicate identity into each business database** — topology C. Simplest,
+   keeps everything.
+2. **A composite database** — topology E.
+3. **A second connection** — topology F.
+4. **Push the check into the database** with native controls. See §6 of
+   [`entitlement-model-brief.md`](entitlement-model-brief.md).
 
-### What options 2 and 3 cost you
+---
 
-Both give up the caller **node** in the data query:
+## Topologies E and F — the recipe
 
-> A composite database refuses to import an entity across a `USE` boundary
-> (`22N16`), and a second connection has no caller node in the data database
-> at all.
+Both declare a **separated identity source**, and both keep path grants by
+cutting each traversal at a node present in *both* databases — Neo4j's documented
+[proxy node pattern](https://neo4j.com/docs/operations-manual/current/scalability/composite-databases/concepts/).
+A relationship cannot span two graphs; a traversal can be cut.
 
-| | Composite (E) | Remote (F) |
-| --- | --- | --- |
-| Per-caller row filtering | ✅ | ✅ |
-| Aggregates computed after filtering | ✅ | ✅ |
-| Curated-only posture, harness, `explain-access` | ✅ | ✅ |
-| One statement, one transaction | ✅ | ❌ two round trips, consistency window |
-| **Path grants** | ✅ via proxy nodes | ✅ via proxy nodes |
-| **Anchoring** | ✅ via proxy nodes | ✅ via proxy nodes |
-| Tools scoping to `caller` | ❌ use an anchor or a parameter | ❌ same |
-| Needs a composite database | yes | no — any two connections |
-| Proxy nodes in the data database | required | required |
+### The config
 
-The engine **refuses to start** rather than degrading quietly: an anchor, a tool
-referencing `caller`, or a grant that cannot be cut safely all fail at load with
-a message saying why.
+```yaml
+security:
+  identity:
+    # ---- E: composite database (one statement, one transaction) ----
+    source: composite
+    identity_graph: fed.identity
+    data_graph: fed.data
 
-### How E and F keep path grants: proxy nodes
+    # ---- F: a second connection (two round trips, no composite needed) ----
+    # source: remote
+    # remote_env_prefix: IDENTITY        # reads IDENTITY_NEO4J_URI etc. from .env
 
-A *relationship* cannot span two graphs. A *traversal* can still be split at a
-node that exists in both — the documented
-[proxy node pattern](https://neo4j.com/docs/operations-manual/current/scalability/composite-databases/concepts/):
-one label present in both constituents, carrying full data in one and only its
-identifier in the other.
-
-Our grant already passes through such a node:
-
-```
-(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)
-└──── resolve in fed.identity ────┘ └────────── traverse in fed.data ──────────┘
-                        ^ AdGroup exists in BOTH; the group NAME crosses as a value
+    # Optional and preferable where it applies: cut at a PROPERTY instead of a
+    # proxy node, which removes the proxies entirely and drops a hop.
+    # boundary_properties:
+    #   Document: authorEmail
 ```
 
-**You author the grant once.** `client_platform_split` declares the same four
-grants, in the same words, as the co-located bundle. The engine finds the cut by
-walking from `caller` and consuming the leading run of identity relationships
-(`identity.group_rels`), then re-roots the data-side half at the proxy:
+For F, the identity connection comes from the environment, never the manifest:
+
+```bash
+IDENTITY_NEO4J_URI=neo4j+s://<identity-instance>.databases.neo4j.io
+IDENTITY_NEO4J_USERNAME=neo4j
+IDENTITY_NEO4J_PASSWORD=<password>
+IDENTITY_NEO4J_DATABASE=neo4j
+```
+
+### Standing it up
 
 ```cypher
--- authored
-(caller)-[:MEMBER_OF]->(:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(resource)
--- emitted, inside USE fed.data
-EXISTS { MATCH (cut:AdGroup)<-[:COVERED_BY]-(:Client)<-[:FOR_CLIENT]-(o)
-         WHERE any(k IN $groupKeys WHERE cut[k] IN authz.authzPrincipals) }
+CREATE DATABASE datadb WAIT;
+CREATE DATABASE identitydb WAIT;
+-- E only:
+CREATE COMPOSITE DATABASE fed;
+CREATE ALIAS fed.data     FOR DATABASE datadb;
+CREATE ALIAS fed.identity FOR DATABASE identitydb;
 ```
 
-A grant with no group hop cuts at the caller instead, which is how authorship
-survives — `(caller)-[:LOGGED]->(resource)` becomes a match on the `User` proxy
-by `principalId`.
+```bash
+cypher-shell -d datadb     -f bundles/asset_platform/data/platform.cypher
+cypher-shell -d datadb     -f <the proxy script below>
+cypher-shell -d identitydb -f bundles/asset_platform/data/identity.cypher
+```
 
-**Anchors split by the same rule**, because an anchor is also a traversal from
-the caller. That matters more than it sounds: anchoring is the largest
-performance lever in the engine, and losing it would have put a separated
-deployment back into scan-and-filter. Measured on 100,000 trades where the caller
-is entitled to 1,000 ([`scripts/bench_separation.py`](../scripts/bench_separation.py),
-Neo4j 2025.10.1) — every variant returns the identical answer:
+Then `NEO4J_DATABASE=fed` (E) or `NEO4J_DATABASE=datadb` plus the `IDENTITY_*`
+variables (F), and run the suite as normal.
+
+### The proxy script
+
+Every node a grant or anchor traverses needs a proxy in the data database, and
+the data-side relationships must live there. For a group-routed model the cut is
+cheap — one stub per group. For `asset_platform` it is **not** cheap, and that is
+worth knowing:
+
+```cypher
+// Proxies for a separated asset_platform. Load into the DATA database, after
+// platform.cypher. Identifier properties only — no attributes, no lifecycle.
+MERGE (:Role {name:'research-energy'});
+MERGE (:Role {name:'research-tech'});
+MATCH (r:Role {name:'research-energy'}), (s:Sector {name:'Energy'})
+MERGE (r)-[:SCOPED_TO {validFrom: date('2026-01-01'), validTo: date('2026-12-31')}]->(s);
+MATCH (r:Role {name:'research-tech'}), (s:Sector {name:'Technology'})
+MERGE (r)-[:SCOPED_TO {validFrom: date('2026-01-01'), validTo: date('2026-12-31')}]->(s);
+
+// Caller stubs, derived from properties platform.cypher already wrote.
+MATCH (d:Document) WHERE d.authorEmail IS NOT NULL
+MERGE (e:Employee {email: d.authorEmail}) MERGE (d)-[:AUTHORED_BY]->(e);
+MATCH (i:Interaction) WHERE i.participantEmails IS NOT NULL
+UNWIND i.participantEmails AS who
+MERGE (p {email: who}) MERGE (p)-[:PARTICIPATED_IN]->(i);
+
+// Coverage, desks and barriers have no property to derive from, so they are
+// declared here — which is the point below.
+MERGE (dk:Desk {name:'Institutional Sales EMEA'});
+MATCH (o:ClientOrg {name:'Rivermark Industries'}), (dk:Desk {name:'Institutional Sales EMEA'})
+MERGE (o)-[:RESTRICTED_FOR]->(dk);
+MATCH (e:Employee {email:'sam.okoye@bank.com'}), (dk:Desk {name:'Institutional Sales EMEA'})
+MERGE (e)-[:WORKS_FOR]->(dk);
+```
+
+### The design lesson worth carrying into an architecture conversation
+
+**How splittable a model is depends on how its grants are rooted.**
+
+A grant routed through a *shared intermediate node* — `caller → group → client →
+record` — cuts cleanly at the group: one stub per group, and membership stays in
+the identity store where it churns.
+
+`asset_platform`'s grants are mostly rooted **at the caller** — authorship,
+attendance, coverage, desk. Cutting those means proxying the callers themselves
+plus the entitlement edges, which replicates most of the identity graph. It works,
+and it is measurably correct, but it is not cheap.
+
+So if separability matters, that is a reason to route entitlements through a
+named scope or group rather than attaching them person-to-record. It is a
+modelling decision with an architectural consequence, and it is easier to make
+before the model is loaded than after.
+
+### What the split costs, measured
+
+On 100,000 records with a caller entitled to ~1,000
+([`scripts/bench_separation.py`](../scripts/bench_separation.py), Neo4j 2025.10.1),
+every variant returning the identical answer:
 
 | Composition | p50 | db hits |
 | --- | --- | --- |
@@ -385,287 +359,22 @@ Neo4j 2025.10.1) — every variant returns the identical answer:
 | **split, anchored-split** | **4.7 ms** | 17,008 |
 | **split, anchored + ACL** | **3.1 ms** | 9,008 |
 
-Two things worth noting. The anchor is worth roughly **17x on either side of the
-split** — the benefit comes from starting at a small known set rather than
-scanning, and that set can be derived from a *value* (group names) just as well
-as from a node. And the split forms are not slower than their co-located
-equivalents; the split grant is marginally **cheaper**, because its data-side
-half starts at the row and tests a name against a short list instead of expanding
-from the caller on every row.
+Anchoring is worth ~17× **either side of the split**, and the split forms are not
+slower than their co-located equivalents — splitting a grant is marginally
+*cheaper*, because the data-side half starts at the row and tests a value rather
+than expanding from the caller on every row examined.
 
-Unanchored, both topologies sit at 70–100 ms on this dataset and would grow with
-it. That is the number to quote when anchoring is not available — not the cost of
-separating identity.
+Unanchored, both sit at 70–100 ms and grow with the dataset. That is the number to
+quote when anchoring is unavailable — not a cost of separating identity.
 
-**The only difference between E and F** is where `authz` comes from. Under
-composite it is bound in-statement and the filter runs inside the `USE` block —
-required, because the outer composite query rejects every graph access
-(`42NA1: Graph access operations are not supported on composite databases`) and
-a path grant *is* graph access. Under remote the same predicate runs as ordinary
-Cypher with `authz` supplied as a parameter. The emitted grant test is otherwise
-byte-identical.
+### Two constraints the engine enforces rather than degrading quietly
 
-**What it costs is replication surface.** Every node a grant passes through needs
-a proxy in the data constituent, and the data-side relationships must live there.
-[`data/proxies.cypher`](../bundles/client_platform_split/data/proxies.cypher)
-builds them from properties `platform.cypher` already wrote, so it needs nothing
-from the identity graph:
-
-| Identity constituent | Data constituent |
-| --- | --- |
-| `(:User)` full attributes | `(:User {email})` — proxy |
-| `(:AdGroup)` full attributes | `(:AdGroup {name})` — proxy |
-| `(:User)-[:MEMBER_OF]->(:AdGroup)` | `(:Client)-[:COVERED_BY]->(:AdGroup)` |
-| | `(:User)-[:LOGGED]->(:Interaction)` |
-
-Membership stays in identity — the high-churn half, the part that changes when
-someone moves desks. What replicates is coverage and authorship, which are facts
-*about* the business records.
-
-**The refusal that matters.** If an identity relationship appears *after* the
-boundary, the suffix would run where those edges do not exist, match nothing, and
-deny silently. False negatives are the error direction nobody notices, so the
-engine rejects such a grant at load rather than composing it.
-
----
-
-## Topologies E and F — the split, made to work
-
-Both use the **`client_platform_split`** bundle: the same client platform as
-above, the same four grant patterns, with the identity graph in a different
-database. It ships configured for E; switching to F is two lines in
-`bundle.yaml` and nothing else.
-
-Load the halves into two databases — the data side also gets the proxy nodes. On
-self-managed Enterprise (or AuraDB Business Critical / Virtual Dedicated Cloud,
-which support several databases per instance):
-
-```cypher
-CREATE DATABASE datadb WAIT;
-CREATE DATABASE identitydb WAIT;
-```
-
-```bash
-cypher-shell -d datadb     -f bundles/client_platform/data/platform.cypher
-cypher-shell -d datadb     -f bundles/client_platform_split/data/proxies.cypher
-cypher-shell -d identitydb -f bundles/client_platform/data/identity.cypher
-```
-
-`identity.cypher` finds no `Client` nodes in `identitydb` and creates no seams
-there — expected, and exactly the situation topology D failed on. The seams now
-live in `datadb`, built by `proxies.cypher` from properties `platform.cypher`
-already wrote.
-
-### E — composite database
-
-```cypher
-CREATE COMPOSITE DATABASE fed;
-CREATE ALIAS fed.data     FOR DATABASE datadb;
-CREATE ALIAS fed.identity FOR DATABASE identitydb;
-```
-
-`bundle.yaml` already declares the constituents:
-
-```yaml
-identity:
-  source: composite
-  identity_graph: fed.identity
-  data_graph: fed.data
-```
-
-Point `.env` at the **composite** database and run:
-
-```bash
-NEO4J_DATABASE=fed ACTIVE_BUNDLE=client_platform_split \
-  uv run python scripts/check_entitlements.py
-```
-
-Expect **16 passed, 0 failed**. The engine composes one statement: the prelude
-resolves the caller under `USE fed.identity`, and the tool's match, the
-entitlement filter and the split path grants all run under `USE fed.data`.
-**One statement, one transaction, two databases** — so unlike F there is no
-consistency window between resolving and reading.
-
-### F — a second connection
-
-Comment out the three composite lines in `bundle.yaml` and uncomment:
-
-```yaml
-identity:
-  source: remote
-  remote_env_prefix: IDENTITY
-```
-
-Keep `grant_model: both` and the `grants:` block exactly as they are — the same
-patterns are cut the same way. What changes is only that the caller's principals
-arrive as a query parameter instead of being resolved in-statement.
-
-The identity connection comes from the environment, never from the manifest —
-same rule as every other connection here:
-
-```bash
-# .env
-NEO4J_URI=neo4j+s://<data-instance>.databases.neo4j.io
-NEO4J_DATABASE=neo4j
-IDENTITY_NEO4J_URI=neo4j+s://<identity-instance>.databases.neo4j.io
-IDENTITY_NEO4J_USERNAME=neo4j
-IDENTITY_NEO4J_PASSWORD=<identity password>
-IDENTITY_NEO4J_DATABASE=neo4j
-```
-
-```bash
-ACTIVE_BUNDLE=client_platform_split uv run python scripts/check_entitlements.py
-```
-
-Expect **16 passed, 0 failed** again — same cases, same results, no composite
-database involved.
-
-F is the most independent identity store available here: a different instance, a
-different region, its own credentials, its own lifecycle, and no composite
-database to administer. The costs are two round trips and a consistency window,
-since principals are read at T0 and the data query runs at T1. It is also the
-extension point for an **external** entitlement service: implement
-`IdentitySource` in
-[`gateway/identity_sources.py`](../gateway/identity_sources.py), register it, and
-the rest of the engine is unchanged.
-
-### The case that proves the split is honest
-
-`INT-2006` is readable by `nadia.haddad` **only** because she logged it — a
-traversal from the caller that no ACL entry expresses. Three cases pin it down:
-
-```
-PASS  authorship reaches a record no ACL entry grants
-PASS  the covering team reaches both, through the group proxy
-PASS  a caller with neither route sees nothing
-```
-
-Ask `explain-access` the same question under each bundle — change only
-`ACTIVE_BUNDLE` and the connection:
-
-```bash
-uv run python - <<'EOF'
-import asyncio, os, warnings; warnings.simplefilter("ignore")
-from gateway.config import Config
-from gateway.yaml_tools import Neo4jExecutor
-from gateway.security_tools import build_explain_access
-c = Config.from_env(active_bundle=os.environ["ACTIVE_BUNDLE"]); ex = Neo4jExecutor(c)
-fn = build_explain_access(c, ex).fn
-async def main():
-    for who in ["nadia.haddad@bank.com", "sofia.rossi@bank.com"]:
-        r = await fn(resource="INT-2006", principal=who)
-        print(f"  {who:24} granted={r['granted']:<6} "
-              f"{[g['reason'] for g in r.get('grantedBy', [])]}")
-asyncio.run(main())
-EOF
-```
-
-```
-co-located / composite / remote — all three identical:
-
-  nadia.haddad   granted=True   ['logged this interaction']
-  sofia.rossi    granted=True   ['covers the client this interaction was with']
-  evan.brooks    granted=False  []
-```
-
-Identical answers and identical reasons in all three topologies. Measured beyond
-the suite, comparing whole result sets across three record types and eight
-callers: **24 comparisons co-located vs composite, 24 co-located vs remote, zero
-divergence.** The grant patterns are authored once and mean the same thing
-wherever identity lives.
-
----
-
-## The hard entitlement scenarios
-
-The `client_platform` bundle above demonstrates coverage, product roles and
-authorship. The three scenarios that decide whether a model is credible on a
-sales-and-trading floor live in the **`iam`** bundle, and each is already a
-conformance case rather than a story. Load it and run them:
-
-```bash
-cypher-shell -a "$NEO4J_URI" -u "$NEO4J_USERNAME" -p "$NEO4J_PASSWORD" \
-  -f bundles/iam/data/iam_demo.cypher
-
-ACTIVE_BUNDLE=iam uv run python scripts/check_entitlements.py
-```
-
-Expect **22 passed, 0 failed**. What those cases prove:
-
-| # | Scenario | Cases | The hard part |
-| --- | --- | --- | --- |
-| 1 | **Private client communication.** A salesperson's direct 1:1 with a client is readable by the participants, *not* by the rest of the coverage team. | `participant sees their own private client chat`, `coverage colleague cannot see a private 1:1 chat`, `unrelated coverage sees no Acme communications` | Two records on the same client differ in visibility: `COMM-1002` (team email thread) reaches the coverage group, `COMM-1001` (1:1 chat) reaches only Anna. **Entitlement is per-record, not per-client** — any model that grants at the client level fails here. |
-| 2 | **Coverage parity.** Two salespeople covering the same corporate see *exactly* the same request book. | `coverage team members see an identical request book`, `coverage parity holds on the anchored tool` | Asserted as set equality between principals (`same_for`), not as a count. Divergence between two people who should be identical is the failure mode that erodes trust in an entitlement system, and it is invisible to per-user spot checks. |
-| 3 | **Booked trade.** A trade booked by one salesperson on behalf of a client. | `booker sees the trade they booked`, `coverage team sees the client trade`, `owning desk sees the trade`, `settlements sees the trade`, `unrelated coverage cannot see the trade`, `private side cannot see markets trades` | Five *different* routes to one record — booker, coverage, desk, settlements, supervision — and two negative controls. The negatives are the test; the positives are easy. |
-
-A fourth scenario nobody asks for up front but everyone raises in review:
-
-| 4 | **Information barrier.** A wall-crossed deal is need-to-know, and broad rights in one domain must not imply access in another. | `named deal team sees the wall-crossed deal`, `supervision does not cross the information barrier`, `sales cannot see the wall-crossed deal` | Supervision sees every communication firm-wide **and still cannot see the deal**. This is the case that shows the model expresses restriction, not just accumulation — a role-hierarchy model where "supervisor ⊇ everyone" cannot represent it at all. |
-
-### Seeing scenario 1 for yourself
-
-Two communications with the same client, two different shapes of entitlement:
-
-```cypher
-MATCH (c:Communication)
-OPTIONAL MATCH (u:User)-[:PARTICIPANT_IN]->(c)
-RETURN c.commId AS id, c.channel AS channel,
-       c.`Permissions.Read` AS acl, collect(u.email) AS participants
-ORDER BY id;
-```
-
-```
-"COMM-1001", "chat",  ["anna.ross@bank.com", "compliance-supervision"], ["anna.ross@bank.com"]
-"COMM-1002", "email", ["coverage-acme",      "compliance-supervision"], ["anna.ross@…","joe.hart@…","sam.diaz@…"]
-```
-
-`COMM-1002` is a team email thread whose ACL names a *group*. `COMM-1001` is a
-1:1 chat whose ACL names an *individual* — which is exactly the entry that has to
-be written, and later revoked, for every private conversation on the floor. Ask
-why each is visible:
-
-```bash
-ACTIVE_BUNDLE=iam uv run python - <<'EOF'
-import asyncio, warnings; warnings.simplefilter("ignore")
-from gateway.config import Config
-from gateway.yaml_tools import Neo4jExecutor
-from gateway.security_tools import build_explain_access
-c = Config.from_env(); ex = Neo4jExecutor(c)
-fn = build_explain_access(c, ex).fn
-async def main():
-    for res in ["COMM-1001", "COMM-1002"]:
-        for who in ["anna.ross@bank.com", "joe.hart@bank.com"]:
-            r = await fn(resource=res, principal=who)
-            print(f"{res}  {who:22} -> {'GRANTED' if r['granted'] else 'no access'}")
-            for g in r.get("grantedBy", []):
-                print("        ", g["reason"])
-asyncio.run(main())
-EOF
-```
-
-```
-COMM-1001  anna.ross@bank.com     -> GRANTED
-             was a participant in the conversation
-COMM-1001  joe.hart@bank.com      -> no access
-COMM-1002  anna.ross@bank.com     -> GRANTED
-             was a participant in the conversation
-COMM-1002  joe.hart@bank.com      -> GRANTED
-             was a participant in the conversation
-```
-
-This is the clearest argument for path grants. Joe covers the same client as
-Anna, and on `COMM-1001` he correctly sees nothing. On `COMM-1002` the engine
-does not fall back to the group ACL at all — it answers **"was a participant"**,
-because participation is a relationship that already exists in the graph. The
-`PARTICIPANT_IN` edge is written once when the conversation happens; no ACL entry
-has to be minted per participant per conversation, and none has to be revoked
-when someone leaves the desk.
-
-> **Running iam and client_platform in one database will mix the two identity
-> graphs** — both create `User` and `AdGroup` nodes, and `entitlement_directory`
-> will then list groups from both. For the scenarios above that is harmless, but
-> use separate instances (topology C) if you want either bundle's directory
-> output to look clean.
+- A grant whose **identity relationship appears after the cut** is rejected at
+  load. The suffix would run where those edges do not exist, match nothing, and
+  deny silently — a false negative, the error direction nobody notices.
+- **Anchors** and tools that reference `caller` are rejected under a separated
+  source. Express the scoping with a parameter or an anchor pattern the engine can
+  cut.
 
 ---
 
@@ -673,28 +382,24 @@ when someone leaves the desk.
 
 | Question | Command |
 | --- | --- |
-| Does the model hold? | `uv run python scripts/check_entitlements.py` |
-| What does each persona see? | `try_tool.py client_opportunities principal=<email>` |
-| Why can they see it? | `explain-access` snippet in topology A |
-| Do derived grants match the lists? | the `differential: true` case in `entitlement_tests.yaml` |
-| What does mediation cost? | `uv run python scripts/bench_mediation.py client_platform` |
-| What does separating identity cost at scale? | `uv run python scripts/bench_separation.py --database benchdb` |
-| What does separating identity cost? | run the same suite under `client_platform` and `client_platform_split` — they should agree |
-| What do native controls cost? | `uv run python scripts/bench_native_controls.py` (Enterprise/Business Critical) |
+| Does the model hold? | `check_entitlements.py` |
+| What does each persona see? | `try_tool.py asset_research principal=<email>` |
+| Why can they see it? | the `explain-access` snippet in topology A |
+| Is the model itself sound? | the `invariant:` cases in `entitlement_tests.yaml` |
+| What does mediation cost? | `bench_mediation.py asset_platform` |
+| What does separation cost? | `bench_separation.py --database benchdb` |
+| Many-group callers? | `bench_principal_scale.py --database benchdb` |
+| What do native controls cost? | `bench_native_controls.py` (Enterprise) |
 
 ## The cast
 
-| Person | Role | Reaches data by |
+| Person | Class | Reaches content by |
 | --- | --- | --- |
-| `lena.fischer@bank.com` | Coverage, EMEA asset managers | coverage team |
-| `marc.dubois@bank.com` | Coverage, EMEA asset managers | coverage team (same as Lena) |
-| `sofia.rossi@bank.com` | Coverage, EMEA hedge funds | coverage team |
-| `evan.brooks@bank.com` | Coverage, NAMR corporates | coverage team |
-| `nadia.haddad@bank.com` | Analytics product specialist | product role — **and authorship** on `INT-2006` |
-| `tomas.silva@bank.com` | Execution product specialist | product role |
-| `grace.okonjo@bank.com` | Platform administration | control role |
-| `peter.lindqvist@bank.com` | Supervisory review | control role, sees everything |
-
-Nadia is the interesting one: she reaches `INT-2006` **only** because she logged
-it, which is a relationship rather than a list entry. That single record is the
-clearest illustration of why the model supports both.
+| `ella.moreau` | Employee | Energy sector scope, authorship |
+| `raj.patel` | Employee | Technology sector scope, authorship |
+| `oscar.lindgren` | Employee | covers Northwind and Kestrel |
+| `sam.okoye` | Employee | covers Rivermark — **restricted for his desk** |
+| `yuki.tanaka` | Employee | coverage and authorship; Technology scope **expired** |
+| `dana.whitfield` | Employee | supervision, by access-control list |
+| `mia.torres` | **ClientUser** | Northwind's research, meetings she signed up for |
+| `liam.becker` | **ClientUser** | Kestrel's research |
