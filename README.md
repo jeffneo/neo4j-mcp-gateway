@@ -161,6 +161,21 @@ predicate is `NULL` does *not* fire, because an absent property yields `NULL` an
 absence is not ambiguity; where absence should deny, write
 `coalesce(resource.clearance, 0) < 3`.
 
+**Which edges decide access?** Computed, not asserted:
+
+```bash
+uv run python scripts/entitlement_surface.py asset_platform
+```
+
+An entitlement edge is not a kind of edge — `AUTHORED_BY` is a business fact until
+a grant traverses it. So the entitlement graph is the *projection* of the graph
+onto the types and properties named in `grants`, `denials` and `identity`. The
+report splits them into **policy** edges (exist only for entitlement), **dual-purpose**
+edges (business facts a rule traverses — the risky category, since a routine edit
+moves access) and **data-only** edges. It also flags a rule whose relationship type
+is absent from the graph: for a grant that under-grants, but **for a denial it
+fails open.**
+
 Declare `protected_labels` so [`scripts/validate_bundle.py`](scripts/validate_bundle.py)
 fails when a business record is missing its access-control list — otherwise such a
 record silently flows to everyone. The validator also persona-diffs mediated tools

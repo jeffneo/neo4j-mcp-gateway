@@ -420,6 +420,59 @@ property rules compare a property to a constant fixed at grant time, so
 team-scoped rules cost one role per team. Both remain layer-3 work — which is
 the argument in §6 of `entitlement-model-brief.md`, unchanged.
 
+## 5d. The entitlement surface — which edges decide access
+
+"Entitlement edge" is not a property of an edge. `AUTHORED_BY` is a business fact
+when you ask who wrote something and an entitlement route when a grant traverses
+it — the same edge in the same graph. What makes a relationship type
+entitlement-bearing is that a **declared rule names it**.
+
+So there is no separate entitlement subgraph to maintain. The entitlement graph is
+the **projection** of the graph onto the relationship types and properties named
+in `grants`, `denials` and `identity` — derivable from configuration rather than
+described in a document that drifts:
+
+```bash
+uv run python scripts/entitlement_surface.py asset_platform
+```
+
+That produces the artefact a security review wants: the exact set of relationship
+types and properties whose modification changes who can read what.
+
+### Three categories, and the middle one carries the risk
+
+| | | Governance |
+| --- | --- | --- |
+| **Policy** | exists only to express entitlement — `SCOPED_TO`, `RESTRICTED_FOR` | tightest change control; these are the crown jewels |
+| **Dual-purpose** | a business fact a rule traverses — `AUTHORED_BY`, `COVERS`, `CLASSIFIED_AS`, `IN_UNIT` | **the dangerous one.** Written by the business feed, and a routine edit silently moves access. Reassigning coverage in a CRM changes who can read |
+| **Data** | named by no rule — `ISSUED_BY`, `OF_CLASS` | normal data governance |
+
+The mitigation for the middle category is knowing the list, which is why it is
+computed rather than remembered.
+
+### Polarity is per rule, not per edge
+
+A type traversed by a grant enables; by a denial, disables; and the same type does
+both — in `asset_platform`, `WITH_ORG` and `WORKS_FOR` each appear in a grant and
+in a denial. The graph therefore cannot be coloured red and green; you have to name
+the rule. This is why *"authorised iff there is an enabling path and no disabling
+path"* operationalises as *"matches a grant pattern and no denial pattern"*.
+
+### The drift it detects
+
+A rule that traverses a relationship type absent from the graph can never fire.
+For a grant that under-grants and is caught by a `must_see` failure. **For a denial
+it fails OPEN** — the barrier silently stops applying, and no per-caller test
+notices because nothing is missing from anyone's results. The surface report flags
+it:
+
+```
+!! DECLARED BUT ABSENT FROM THE GRAPH (2)
+   RESTRICTED_FOR, SIGNED_UP_FOR
+```
+
+Worth running in CI beside the conformance suite.
+
 ## 6. Known limits
 
 - **The gateway is the enforcement boundary**, not the database. Anyone with
